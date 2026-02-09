@@ -462,10 +462,17 @@ jobs:
             fi
             
             # Determine function name with environment prefix
-            # For v2 functions, keep the _v2 suffix but still add prefix for dev
-            if [[ "$ENTRY_POINT" == *_v2 ]]; then
-              # V2 function: dev_save_employee_skill_v2 or save_employee_skill_v2
-              FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}"
+            # Check if folder name contains _v2 to identify v2 functions
+            # Some v2 functions have entry points without _v2 suffix
+            if [[ "$fn_folder" == *_v2 ]]; then
+              # V2 function folder - ensure entry point has _v2 suffix
+              if [[ "$ENTRY_POINT" == *_v2 ]]; then
+                # Entry point already has _v2: dev_save_employee_skill_v2
+                FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}"
+              else
+                # Entry point missing _v2: add it: dev_get_master_certificates_v2
+                FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}_v2"
+              fi
             else
               # Legacy function: dev_save_employee or save_employee
               FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}"
