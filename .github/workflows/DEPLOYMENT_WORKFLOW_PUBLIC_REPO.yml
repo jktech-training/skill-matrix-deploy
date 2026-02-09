@@ -56,6 +56,8 @@ jobs:
       repository: ${{ needs.determine-deployment.outputs.repository }}
       branch: ${{ needs.determine-deployment.outputs.branch }}
       deployment_type: ${{ needs.determine-deployment.outputs.deployment_type }}
+    secrets:
+      PRIVATETOKENPULL: ${{ secrets.PRIVATETOKENPULL }}
 
   deploy-frontend:
     needs: determine-deployment
@@ -65,3 +67,5 @@ jobs:
       repository: ${{ needs.determine-deployment.outputs.repository }}
       branch: ${{ needs.determine-deployment.outputs.branch }}
       deployment_type: ${{ needs.determine-deployment.outputs.deployment_type }}
+    secrets:
+      PRIVATETOKENPULL: ${{ secrets.PRIVATETOKENPULL }}

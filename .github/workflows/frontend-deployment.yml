@@ -35,6 +35,9 @@ on:
         required: false
         type: string
         default: 'frontend'
+    secrets:
+      PRIVATETOKENPULL:
+        required: true
 
 jobs:
   deploy-frontend:
