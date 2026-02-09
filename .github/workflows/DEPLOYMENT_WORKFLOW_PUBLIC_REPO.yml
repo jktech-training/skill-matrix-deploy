@@ -51,7 +51,7 @@ jobs:
   deploy-backend:
     needs: determine-deployment
     if: needs.determine-deployment.outputs.deployment_type == 'backend' || needs.determine-deployment.outputs.deployment_type == 'full'
-    uses: ./.github/workflows/backend-deployment.yml
+    uses: jktech-training/skill-matrix-deploy/.github/workflows/backend-deployment.yml@main
     with:
       repository: ${{ needs.determine-deployment.outputs.repository }}
       branch: ${{ needs.determine-deployment.outputs.branch }}
@@ -60,7 +60,7 @@ jobs:
   deploy-frontend:
     needs: determine-deployment
     if: needs.determine-deployment.outputs.deployment_type == 'frontend' || needs.determine-deployment.outputs.deployment_type == 'full'
-    uses: ./.github/workflows/frontend-deployment.yml
+    uses: jktech-training/skill-matrix-deploy/.github/workflows/frontend-deployment.yml@main
     with:
       repository: ${{ needs.determine-deployment.outputs.repository }}
       branch: ${{ needs.determine-deployment.outputs.branch }}
