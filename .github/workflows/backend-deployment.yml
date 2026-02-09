@@ -57,37 +57,33 @@ jobs:
           echo "repository=$REPO" >> $GITHUB_OUTPUT
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
 
-      - name: Checkout Public Repo (for actions)
-        uses: actions/checkout@v4
-        with:
-          repository: jktech-training/skill-matrix-deploy
-          path: .github-actions
-
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
           repository: ${{ steps.repo-info.outputs.repository }}
           ref: ${{ steps.repo-info.outputs.branch }}
           token: ${{ secrets.PRIVATETOKENPULL }}
+          path: source-code
 
       - name: Setup Environment
         id: env
-        uses: ./.github-actions/.github/actions/setup-environment
+        uses: ./.github/actions/setup-environment
         with:
           repository: ${{ steps.repo-info.outputs.repository }}
           branch: ${{ steps.repo-info.outputs.branch }}
 
       - name: Detect Backend Changes
         id: changes
-        uses: ./.github-actions/.github/actions/detect-changes
+        uses: ./.github/actions/detect-changes
         with:
           branch: ${{ steps.repo-info.outputs.branch }}
           path: backend
+        working-directory: source-code
 
       - name: Setup Database Credentials
         if: steps.changes.outputs.has_changes == 'true'
         id: db
-        uses: ./.github-actions/.github/actions/setup-db-credentials
+        uses: ./.github/actions/setup-db-credentials
         with:
           repository: ${{ steps.repo-info.outputs.repository }}
           branch: ${{ steps.repo-info.outputs.branch }}
@@ -101,7 +97,7 @@ jobs:
 
       - name: Setup Google Cloud
         if: steps.changes.outputs.has_changes == 'true'
-        uses: ./.github-actions/.github/actions/setup-gcp
+        uses: ./.github/actions/setup-gcp
         with:
           gcp_sakey: ${{ secrets.GCP_SAKEY }}
           project_id: training-project-419308
@@ -120,10 +116,13 @@ jobs:
           echo "Environment: ${{ steps.env.outputs.environment }}"
           echo "Function prefix: ${{ steps.env.outputs.env_prefix }}"
           
+          # Change to source code directory
+          cd source-code
+          
           git fetch --unshallow || true
           
-          # Source helper functions
-          source .github-actions/.github/scripts/function-helpers.sh
+          # Source helper functions (from parent directory)
+          source ../.github/scripts/function-helpers.sh
           
           DEPLOYED_COUNT=0
           SKIPPED_COUNT=0
