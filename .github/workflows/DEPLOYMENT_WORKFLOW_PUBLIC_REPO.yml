@@ -1,71 +1,623 @@
-# This workflow routes deployment requests to the appropriate workflow
-# Place in PUBLIC repository: jktech-training/skill-matrix-deploy
-#
-# Usage from private repo (via repository_dispatch):
-# - Full deployment: Trigger "trigger-from-private" with deployment_type: "full" (or omit)
-# - Backend only: Trigger "trigger-from-private" with deployment_type: "backend"
-# - Frontend only: Trigger "trigger-from-private" with deployment_type: "frontend"
-#
-# Or trigger specific workflows directly:
-# - "deploy-backend" for backend only
-# - "deploy-frontend" for frontend only
-# - "deploy-full" for full deployment
+# This workflow should be placed in the PUBLIC repository: jktech-training/skill-matrix-deploy
+# File: .github/workflows/deploy.yml
 
-name: Deployment Router
+name: Deploy Frontend and Backend
 
 on:
   repository_dispatch:
-    types: [trigger-from-private, deploy-full, deploy-frontend, deploy-backend]
+    types: [trigger-from-private]
 
 jobs:
-  determine-deployment:
+  # ============================================
+  # SETUP JOB - Common setup for all deployments
+  # ============================================
+  setup:
     runs-on: ubuntu-latest
     outputs:
-      deployment_type: ${{ steps.determine.outputs.deployment_type }}
-      repository: ${{ steps.determine.outputs.repository }}
-      branch: ${{ steps.determine.outputs.branch }}
+      deploy_frontend: ${{ steps.env.outputs.deploy_frontend }}
+      deploy_backend: ${{ steps.env.outputs.deploy_backend }}
+      repo: ${{ steps.env.outputs.repo }}
+      branch: ${{ steps.env.outputs.branch }}
+      env: ${{ steps.env.outputs.env }}
+      env_prefix: ${{ steps.env.outputs.env_prefix }}
+      cloud_run_service: ${{ steps.env.outputs.cloud_run_service }}
+      image_suffix: ${{ steps.env.outputs.image_suffix }}
+      bucket_name: ${{ steps.env.outputs.bucket_name }}
+      db_env_vars: ${{ steps.db.outputs.db_env_vars }}
+
     steps:
-      - name: Determine Deployment Type
-        id: determine
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}
+          ref: ${{ github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.PRIVATETOKENPULL }}
+
+      - name: Determine Environment
+        id: env
         run: |
-          # Get deployment type from event or payload
-          if [[ "${{ github.event.action }}" == "deploy-backend" ]]; then
-            DEPLOYMENT_TYPE="backend"
-          elif [[ "${{ github.event.action }}" == "deploy-frontend" ]]; then
-            DEPLOYMENT_TYPE="frontend"
-          elif [[ "${{ github.event.action }}" == "deploy-full" ]]; then
-            DEPLOYMENT_TYPE="full"
+          BRANCH=${{ github.event.client_payload.ref || 'main' }}
+          REPO=${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}
+          DEPLOYMENT_TYPE=${{ github.event.client_payload.deployment_type || 'full' }}
+          
+          # Determine what should be deployed based on deployment_type
+          if [[ "$DEPLOYMENT_TYPE" == "frontend" ]]; then
+            DEPLOY_BACKEND="false"
+            DEPLOY_FRONTEND="true"
+          elif [[ "$DEPLOYMENT_TYPE" == "backend" ]]; then
+            DEPLOY_BACKEND="true"
+            DEPLOY_FRONTEND="false"
           else
-            # Default from payload or default to full
-            DEPLOYMENT_TYPE="${{ github.event.client_payload.deployment_type || 'full' }}"
+            # full deployment
+            DEPLOY_BACKEND="true"
+            DEPLOY_FRONTEND="true"
           fi
           
-          echo "deployment_type=$DEPLOYMENT_TYPE" >> $GITHUB_OUTPUT
-          echo "Deployment type: $DEPLOYMENT_TYPE"
+          echo "Deployment Type: $DEPLOYMENT_TYPE"
+          echo "Will deploy backend: $DEPLOY_BACKEND"
+          echo "Will deploy frontend: $DEPLOY_FRONTEND"
           
-          REPO="${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}"
-          BRANCH="${{ github.event.client_payload.ref || 'main' }}"
-          echo "repository=$REPO" >> $GITHUB_OUTPUT
+          # Determine repository identifier for service naming
+          if [[ "$REPO" == *"skill-matrix-V2"* ]]; then
+            REPO_ID="skill-matrix-V2"
+          else
+            REPO_ID="skill-matrix"
+          fi
+          
+          if [[ "$BRANCH" == "main" ]]; then
+            ENV="production"
+            ENV_PREFIX=""
+            CLOUD_RUN_SERVICE="$REPO_ID"
+            IMAGE_SUFFIX=""
+            BUCKET_NAME="skill_matrix"
+          else
+            ENV="development"
+            ENV_PREFIX="dev_"
+            CLOUD_RUN_SERVICE="${REPO_ID}-dev"
+            IMAGE_SUFFIX="-dev"
+            BUCKET_NAME="dev_skill_matrix"
+          fi
+          
+          # Convert Cloud Run service name to lowercase (Cloud Run requires lowercase names)
+          CLOUD_RUN_SERVICE=$(echo "$CLOUD_RUN_SERVICE" | tr '[:upper:]' '[:lower:]')
+          
+          echo "repo=$REPO" >> $GITHUB_OUTPUT
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "env=$ENV" >> $GITHUB_OUTPUT
+          echo "env_prefix=$ENV_PREFIX" >> $GITHUB_OUTPUT
+          echo "cloud_run_service=$CLOUD_RUN_SERVICE" >> $GITHUB_OUTPUT
+          echo "image_suffix=$IMAGE_SUFFIX" >> $GITHUB_OUTPUT
+          echo "bucket_name=$BUCKET_NAME" >> $GITHUB_OUTPUT
+          echo "deploy_frontend=$DEPLOY_FRONTEND" >> $GITHUB_OUTPUT
+          echo "deploy_backend=$DEPLOY_BACKEND" >> $GITHUB_OUTPUT
+          echo "Environment: $ENV"
+          echo "Branch: $BRANCH"
+          echo "Repository: $REPO"
+          echo "Cloud Run Service: $CLOUD_RUN_SERVICE"
 
-  deploy-backend:
-    needs: determine-deployment
-    if: needs.determine-deployment.outputs.deployment_type == 'backend' || needs.determine-deployment.outputs.deployment_type == 'full'
-    uses: jktech-training/skill-matrix-deploy/.github/workflows/backend-deployment.yml@main
-    with:
-      repository: ${{ needs.determine-deployment.outputs.repository }}
-      branch: ${{ needs.determine-deployment.outputs.branch }}
-      deployment_type: ${{ needs.determine-deployment.outputs.deployment_type }}
-    secrets:
-      PRIVATETOKENPULL: ${{ secrets.PRIVATETOKENPULL }}
+      - name: Set Database Credentials
+        id: db
+        run: |
+          REPO="${{ steps.env.outputs.repo }}"
+          BRANCH="${{ steps.env.outputs.branch }}"
+          
+          # Determine which DB credentials secret to use based on repo and branch
+          if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
+            # skill-matrix main branch - use DB_PROD
+            DB_ENV_VARS="${{ secrets.DB_PROD }}"
+            echo "Using DB credentials for: skill-matrix (main/production)"
+          elif [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" != "main" ]]; then
+            # skill-matrix development branch - use DB_DEV
+            DB_ENV_VARS="${{ secrets.DB_DEV }}"
+            echo "Using DB credentials for: skill-matrix (development)"
+          elif [[ "$REPO" == "jktech-training/skill-matrix-V2" ]] && [[ "$BRANCH" != "main" ]]; then
+            # skill-matrix-V2 development branch - use DB_DEV_V2
+            DB_ENV_VARS="${{ secrets.DB_DEV_V2 }}"
+            echo "Using DB credentials for: skill-matrix-V2 (development)"
+          else
+            # Fallback to DB_DEV_V2 for skill-matrix-V2 main if needed
+            DB_ENV_VARS="${{ secrets.DB_DEV_V2 }}"
+            echo "Using default DB credentials (DB_DEV_V2)"
+          fi
+          
+          # Convert newlines to commas for gcloud --set-env-vars format
+          # Remove empty lines and trim whitespace, then join with commas
+          DB_ENV_VARS=$(echo "$DB_ENV_VARS" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '\n' ',' | sed 's/,$//')
+          
+          # Add environment-specific variables if they exist in separate secrets
+          BASE_URL_SECRET="${{ secrets.BASE_URL }}"
+          SEND_EMAIL_URL_SECRET="${{ secrets.SEND_EMAIL_URL }}"
+          APP_URL_SECRET="${{ secrets.APP_URL }}"
+          EMAIL_TEMPLATE_SECRET="${{ secrets.EMAIL_TEMPLATE }}"
+          
+          if [[ "$DB_ENV_VARS" != *"BASE_URL="* ]] && [[ -n "$BASE_URL_SECRET" ]]; then
+            DB_ENV_VARS="$DB_ENV_VARS,BASE_URL=$BASE_URL_SECRET"
+          fi
+          
+          if [[ "$DB_ENV_VARS" != *"SEND_EMAIL_URL="* ]] && [[ -n "$SEND_EMAIL_URL_SECRET" ]]; then
+            DB_ENV_VARS="$DB_ENV_VARS,SEND_EMAIL_URL=$SEND_EMAIL_URL_SECRET"
+          fi
+          
+          if [[ "$DB_ENV_VARS" != *"APP_URL="* ]] && [[ -n "$APP_URL_SECRET" ]]; then
+            DB_ENV_VARS="$DB_ENV_VARS,APP_URL=$APP_URL_SECRET"
+          fi
+          
+          if [[ "$DB_ENV_VARS" != *"EMAIL_TEMPLATE="* ]] && [[ -n "$EMAIL_TEMPLATE_SECRET" ]]; then
+            DB_ENV_VARS="$DB_ENV_VARS,EMAIL_TEMPLATE=$EMAIL_TEMPLATE_SECRET"
+          fi
+          
+          echo "db_env_vars=$DB_ENV_VARS" >> $GITHUB_OUTPUT
+          echo "✅ Environment variables loaded successfully"
 
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.GCP_SAKEY }}'
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: training-project-419308
+
+  # ============================================
+  # FRONTEND DEPLOYMENT JOB - Runs in parallel with backend
+  # ============================================
   deploy-frontend:
-    needs: determine-deployment
-    if: needs.determine-deployment.outputs.deployment_type == 'frontend' || needs.determine-deployment.outputs.deployment_type == 'full'
-    uses: jktech-training/skill-matrix-deploy/.github/workflows/frontend-deployment.yml@main
-    with:
-      repository: ${{ needs.determine-deployment.outputs.repository }}
-      branch: ${{ needs.determine-deployment.outputs.branch }}
-      deployment_type: ${{ needs.determine-deployment.outputs.deployment_type }}
-    secrets:
-      PRIVATETOKENPULL: ${{ secrets.PRIVATETOKENPULL }}
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.deploy_frontend == 'true'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}
+          ref: ${{ github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.PRIVATETOKENPULL }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.GCP_SAKEY }}'
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: training-project-419308
+
+      - name: Check for Changes in Frontend
+        id: check_frontend
+        run: |
+          set -euo pipefail
+          
+          git fetch --unshallow || true
+          
+          # Try to find the base commit
+          BRANCH="${{ needs.setup.outputs.branch }}"
+          CHANGED=""
+          
+          if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+            # Branch exists on origin, compare against it
+            BASE_SHA=$(git merge-base "origin/$BRANCH" HEAD 2>/dev/null || echo "")
+            if [[ -n "$BASE_SHA" ]] && [[ "$BASE_SHA" != "$(git rev-parse HEAD)" ]]; then
+              # Compare against branch's previous commit
+              CHANGED=$(git diff --name-only "$BASE_SHA" HEAD | grep '^frontend/' || true)
+            fi
+          fi
+          
+          # If no changes detected and branch exists, check if files exist (for first-time deployments)
+          if [[ -z "$CHANGED" ]]; then
+            # Check if frontend files exist in current commit
+            if git ls-tree -r --name-only HEAD | grep -q '^frontend/'; then
+              # Files exist, check if this is different from main (in case branches have same commits)
+              if git rev-parse --verify "origin/main" >/dev/null 2>&1; then
+                MAIN_SHA=$(git rev-parse "origin/main")
+                CURRENT_SHA=$(git rev-parse HEAD)
+                # If current commit is different from main, or if main doesn't have these files, deploy
+                if [[ "$CURRENT_SHA" != "$MAIN_SHA" ]] || ! git ls-tree -r --name-only "$MAIN_SHA" | grep -q '^frontend/'; then
+                  CHANGED="frontend/"
+                  echo "Frontend files exist and differ from main - deploying"
+                fi
+              else
+                # No main branch, but files exist - deploy
+                CHANGED="frontend/"
+                echo "Frontend files exist - deploying"
+              fi
+            fi
+          fi
+          if [[ -z "$CHANGED" ]]; then
+            echo "Frontend not changed."
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "Frontend has changes."
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set Docker Image Name and Tag
+        if: steps.check_frontend.outputs.has_changes == 'true'
+        run: |
+          IMAGE_SUFFIX="${{ needs.setup.outputs.image_suffix }}"
+          IMAGE_NAME="frontend-ui${IMAGE_SUFFIX}"
+          TAG=$(date +%Y%m%d-%H%M%S)
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "Full image: asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG}"
+
+      - name: Build and Push Docker Image
+        if: steps.check_frontend.outputs.has_changes == 'true'
+        run: |
+          docker build \
+            --build-arg VITE_BASE_URL="${{ secrets.VITE_BASE_URL }}" \
+            --build-arg VITE_SSO_URL="${{ secrets.VITE_SSO_URL }}" \
+            -t asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG} \
+            ./frontend
+          gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+          docker push asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG}
+
+      - name: Deploy Frontend to Cloud Run
+        if: steps.check_frontend.outputs.has_changes == 'true'
+        run: |
+          CLOUD_RUN_SERVICE="${{ needs.setup.outputs.cloud_run_service }}"
+          gcloud run deploy ${CLOUD_RUN_SERVICE} \
+            --image=asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG} \
+            --platform=managed \
+            --region=asia-south1 \
+            --allow-unauthenticated \
+            --quiet
+          gcloud run services add-iam-policy-binding ${CLOUD_RUN_SERVICE} \
+            --member="allUsers" \
+            --role="roles/run.invoker" \
+            --region=asia-south1 \
+            --platform=managed \
+            --quiet
+
+  # ============================================
+  # BACKEND DEPLOYMENT JOB - Runs in parallel with frontend
+  # ============================================
+  deploy-backend:
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.deploy_backend == 'true'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}
+          ref: ${{ github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.PRIVATETOKENPULL }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.GCP_SAKEY }}'
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: training-project-419308
+
+      - name: Check for Changes in Backend
+        id: check_backend
+        run: |
+          set -euo pipefail
+          
+          git fetch --unshallow || true
+          
+          # Try to find the base commit
+          BRANCH="${{ needs.setup.outputs.branch }}"
+          CHANGED=""
+          
+          if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+            # Branch exists on origin, compare against it
+            BASE_SHA=$(git merge-base "origin/$BRANCH" HEAD 2>/dev/null || echo "")
+            if [[ -n "$BASE_SHA" ]] && [[ "$BASE_SHA" != "$(git rev-parse HEAD)" ]]; then
+              # Compare against branch's previous commit
+              CHANGED=$(git diff --name-only "$BASE_SHA" HEAD | grep '^backend/' || true)
+            fi
+          fi
+          
+          # If no changes detected and branch exists, check if files exist (for first-time deployments)
+          if [[ -z "$CHANGED" ]]; then
+            # Check if backend files exist in current commit
+            if git ls-tree -r --name-only HEAD | grep -q '^backend/'; then
+              # Files exist, check if this is different from main (in case branches have same commits)
+              if git rev-parse --verify "origin/main" >/dev/null 2>&1; then
+                MAIN_SHA=$(git rev-parse "origin/main")
+                CURRENT_SHA=$(git rev-parse HEAD)
+                # If current commit is different from main, or if main doesn't have these files, deploy
+                if [[ "$CURRENT_SHA" != "$MAIN_SHA" ]] || ! git ls-tree -r --name-only "$MAIN_SHA" | grep -q '^backend/'; then
+                  CHANGED="backend/"
+                  echo "Backend files exist and differ from main - deploying"
+                fi
+              else
+                # No main branch, but files exist - deploy
+                CHANGED="backend/"
+                echo "Backend files exist - deploying"
+              fi
+            fi
+          fi
+          if [[ -z "$CHANGED" ]]; then
+            echo "Backend not changed."
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "Backend has changes."
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy Changed Backend Functions
+        if: steps.check_backend.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          echo "Detecting and deploying changed Cloud Functions in backend/..."
+          echo "Environment: ${{ needs.setup.outputs.env }}"
+          echo "Function prefix: ${{ needs.setup.outputs.env_prefix }}"
+          
+          git fetch --unshallow || true
+          
+          # Function to extract entry point from main.py
+          # Handles multiple patterns: def func(request), def func(request: Request), etc.
+          extract_entry_point() {
+            local main_file="$1"
+            # Try multiple patterns
+            ENTRY_POINT=$(grep -Po '^def\s+\K\w+(?=\s*\([^)]*request[^)]*\):)' "$main_file" | head -n1)
+            
+            # If not found, try simpler pattern
+            if [[ -z "$ENTRY_POINT" ]]; then
+              ENTRY_POINT=$(grep -E '^def\s+\w+\s*\(' "$main_file" | head -n1 | grep -oP 'def\s+\K\w+')
+            fi
+            
+            echo "$ENTRY_POINT"
+          }
+          
+          # Function to detect required environment variables for a function
+          # Scans main.py for os.getenv() calls to determine what env vars are needed
+          get_function_env_vars() {
+            local main_file="$1"
+            local fn_dir="$2"
+            local required_vars=""
+            
+            # Base DB variables (all functions need these)
+            local base_vars="DB_HOST,DB_USER,DB_PASS,DB_NAME,DB_PORT,DB_SCHEMA"
+            
+            # Check for specific env vars in main.py
+            if grep -q "os.getenv.*BASE_URL" "$main_file" 2>/dev/null; then
+              required_vars="${required_vars}BASE_URL,"
+            fi
+            
+            if grep -q "os.getenv.*SEND_EMAIL_URL" "$main_file" 2>/dev/null; then
+              required_vars="${required_vars}SEND_EMAIL_URL,"
+            fi
+            
+            if grep -q "os.getenv.*APP_URL" "$main_file" 2>/dev/null; then
+              required_vars="${required_vars}APP_URL,"
+            fi
+            
+            if grep -q "os.getenv.*EMAIL_TEMPLATE" "$main_file" 2>/dev/null; then
+              required_vars="${required_vars}EMAIL_TEMPLATE,"
+            fi
+            
+            if grep -q "os.getenv.*BUCKET_NAME" "$main_file" 2>/dev/null; then
+              required_vars="${required_vars}BUCKET_NAME,"
+            fi
+            
+            # Combine base vars with function-specific vars
+            if [[ -n "$required_vars" ]]; then
+              required_vars="${base_vars},${required_vars}"
+            else
+              required_vars="$base_vars"
+            fi
+            
+            # Remove trailing comma
+            required_vars=$(echo "$required_vars" | sed 's/,$//')
+            
+            echo "$required_vars"
+          }
+          
+          # Function to build env vars string for a specific function
+          # Extracts only the required variables from the full env vars string
+          build_function_env_vars() {
+            local required_vars="$1"
+            local all_env_vars="$2"
+            local function_env_vars="ENV=${{ needs.setup.outputs.env }}"
+            
+            # Create a temporary file to parse env vars
+            local temp_file=$(mktemp)
+            echo "$all_env_vars" | tr ',' '\n' > "$temp_file"
+            
+            # Split required vars into array
+            IFS=',' read -ra REQUIRED <<< "$required_vars"
+            
+            # Add required variables from all_env_vars
+            for var in "${REQUIRED[@]}"; do
+              var=$(echo "$var" | xargs) # trim whitespace
+              if [[ -n "$var" ]]; then
+                # Find the variable in all_env_vars (handle both KEY=value and KEY=value, formats)
+                var_line=$(grep "^${var}=" "$temp_file" | head -n1)
+                if [[ -n "$var_line" ]]; then
+                  # Extract the full KEY=value pair
+                  var_pair=$(echo "$var_line" | cut -d'=' -f1-)
+                  if [[ -n "$var_pair" ]]; then
+                    function_env_vars="${function_env_vars},${var_pair}"
+                  fi
+                fi
+              fi
+            done
+            
+            rm -f "$temp_file"
+            
+            echo "$function_env_vars"
+          }
+          
+          # Function to check if function uses bucket trigger
+          # Bucket-triggered functions are triggered by Cloud Storage events (file uploads)
+          # HTTP-triggered functions that use storage (like uploadCv_v2) should NOT be detected as bucket triggers
+          is_bucket_trigger() {
+            local main_file="$1"
+            local fn_dir="$2"
+            
+            # Check deployment comments for explicit --trigger-bucket
+            if grep -q "--trigger-bucket" "$main_file" 2>/dev/null; then
+              return 0
+            fi
+            
+            # Check folder name patterns (for future bucket-triggered functions)
+            # These patterns indicate functions that process files uploaded to buckets
+            if [[ "$fn_dir" == *"CSVtoDB"* ]] || \
+               [[ "$fn_dir" == *"load"* ]] || \
+               [[ "$fn_dir" == *"split"* ]]; then
+              return 0
+            fi
+            
+            # Explicitly exclude known HTTP-triggered functions that use storage
+            # These functions use storage.Client but are HTTP-triggered
+            if [[ "$fn_dir" == *"uploadCv"* ]] || \
+               [[ "$fn_dir" == *"getMasterFile"* ]]; then
+              return 1
+            fi
+            
+            # Check for bucket event handler patterns (functions that receive bucket events)
+            # Bucket-triggered functions typically have event/data parameters, not request
+            if grep -q "def.*event\|def.*data.*bucket\|def.*file.*event" "$main_file" 2>/dev/null; then
+              return 0
+            fi
+            
+            return 1
+          }
+          
+          # Use process substitution to avoid subshell issues
+          DEPLOYED_COUNT=0
+          SKIPPED_COUNT=0
+          
+          # Store results in array to avoid subshell issues
+          while IFS= read -r MAIN_FILE; do
+            fn_dir=$(dirname "$MAIN_FILE")
+            fn_folder=$(basename "$fn_dir")
+            
+            # Check for changes
+            BRANCH="${{ needs.setup.outputs.branch }}"
+            CHANGED_FILES=""
+            
+            if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+              BASE_SHA=$(git merge-base "origin/$BRANCH" HEAD 2>/dev/null || echo "")
+              if [[ -n "$BASE_SHA" ]] && [[ "$BASE_SHA" != "$(git rev-parse HEAD)" ]]; then
+                CHANGED_FILES=$(git diff --name-only "$BASE_SHA" HEAD -- "$fn_dir" || echo "")
+              fi
+            fi
+            
+            if [[ -z "$CHANGED_FILES" ]]; then
+              if git ls-tree -r --name-only HEAD -- "$fn_dir" | grep -q .; then
+                echo "📝 Deploying $fn_folder (exists in current commit)"
+              else
+                echo "⏭️  Skipping $fn_folder (no changes detected)"
+                ((SKIPPED_COUNT++)) || true
+                continue
+              fi
+            else
+              echo "📝 Changes detected in $fn_folder"
+            fi
+            
+            # Extract entry point from main.py
+            ENTRY_POINT=$(extract_entry_point "$MAIN_FILE")
+            
+            if [[ -z "$ENTRY_POINT" ]]; then
+              echo "⚠️  No entry point found in $MAIN_FILE. Skipping..."
+              ((SKIPPED_COUNT++)) || true
+              continue
+            fi
+            
+            # Determine function name with environment prefix
+            # Check if folder name contains _v2 to identify v2 functions
+            # Some v2 functions have entry points without _v2 suffix
+            ENV_PREFIX="${{ needs.setup.outputs.env_prefix }}"
+            if [[ "$fn_folder" == *_v2 ]]; then
+              # V2 function folder - ensure entry point has _v2 suffix
+              if [[ "$ENTRY_POINT" == *_v2 ]]; then
+                # Entry point already has _v2: dev_save_employee_skill_v2
+                FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}"
+              else
+                # Entry point missing _v2: add it: dev_get_master_certificates_v2
+                FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}_v2"
+              fi
+            else
+              # Legacy function: dev_save_employee or save_employee
+              FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}"
+            fi
+            
+            # Detect required environment variables for this function
+            REQUIRED_ENV_VARS=$(get_function_env_vars "$MAIN_FILE" "$fn_dir")
+            FUNCTION_ENV_VARS=$(build_function_env_vars "$REQUIRED_ENV_VARS" "${{ needs.setup.outputs.db_env_vars }}")
+            
+            # Add BUCKET_NAME if function requires it (for bucket trigger functions or uploadCv)
+            BUCKET_NAME="${{ needs.setup.outputs.bucket_name }}"
+            if grep -q "BUCKET_NAME" <<< "$REQUIRED_ENV_VARS"; then
+              FUNCTION_ENV_VARS="${FUNCTION_ENV_VARS},BUCKET_NAME=${BUCKET_NAME}"
+            fi
+            
+            echo "🚀 Deploying $FUNCTION_NAME from $fn_folder"
+            echo "   Entry point: $ENTRY_POINT"
+            echo "   Environment: ${{ needs.setup.outputs.env }}"
+            echo "   Directory: $fn_dir"
+            echo "   Required env vars: $REQUIRED_ENV_VARS"
+            
+            # Check if it's a bucket trigger function
+            if is_bucket_trigger "$MAIN_FILE" "$fn_dir"; then
+              echo "   Trigger: Cloud Storage (bucket)"
+              
+              gcloud functions deploy "$FUNCTION_NAME" \
+                --runtime python310 \
+                --trigger-bucket ${BUCKET_NAME} \
+                --entry-point "$ENTRY_POINT" \
+                --source "$fn_dir" \
+                --service-account training-project-419308@appspot.gserviceaccount.com \
+                --region asia-south1 \
+                --no-gen2 \
+                --memory 512MB \
+                --timeout 540s \
+                --set-env-vars "$FUNCTION_ENV_VARS" \
+                --quiet
+              
+              if [[ $? -eq 0 ]]; then
+                echo "✅ Successfully deployed: $FUNCTION_NAME (bucket trigger)"
+                ((DEPLOYED_COUNT++)) || true
+              else
+                echo "❌ Failed to deploy: $FUNCTION_NAME"
+                ((SKIPPED_COUNT++)) || true
+              fi
+            else
+              echo "   Trigger: HTTP"
+              
+              gcloud functions deploy "$FUNCTION_NAME" \
+                --runtime python310 \
+                --trigger-http \
+                --entry-point "$ENTRY_POINT" \
+                --source "$fn_dir" \
+                --service-account training-project-419308@appspot.gserviceaccount.com \
+                --allow-unauthenticated \
+                --no-gen2 \
+                --region asia-south1 \
+                --set-env-vars "$FUNCTION_ENV_VARS" \
+                --quiet
+              
+              if [[ $? -eq 0 ]]; then
+                echo "✅ Successfully deployed: $FUNCTION_NAME (HTTP trigger)"
+                ((DEPLOYED_COUNT++)) || true
+              else
+                echo "❌ Failed to deploy: $FUNCTION_NAME"
+                ((SKIPPED_COUNT++)) || true
+              fi
+            fi
+            
+          done < <(find backend -type f -name "main.py")
+          
+          echo ""
+          echo "📊 Backend Deployment Summary:"
+          echo "   Environment: ${{ needs.setup.outputs.env }}"
+          echo "   Deployed: $DEPLOYED_COUNT functions"
+          echo "   Skipped: $SKIPPED_COUNT functions"
+          
+          # Exit with error if deployment failed
+          if [[ $DEPLOYED_COUNT -eq 0 ]] && [[ $SKIPPED_COUNT -gt 0 ]]; then
+            echo "⚠️  Warning: No functions were deployed"
+            exit 1
+          fi
