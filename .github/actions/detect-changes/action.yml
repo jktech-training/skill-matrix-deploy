@@ -1,0 +1,67 @@
+name: Detect Changes
+description: Detects changes in frontend or backend directories
+
+inputs:
+  branch:
+    required: true
+    description: Branch name to compare against
+  path:
+    required: true
+    description: Path to check (frontend or backend)
+
+outputs:
+  has_changes:
+    description: Whether changes were detected
+    value: ${{ steps.check.outputs.has_changes }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check for Changes
+      id: check
+      shell: bash
+      run: |
+        set -euo pipefail
+        git fetch --unshallow || true
+        
+        BRANCH="${{ inputs.branch }}"
+        PATH_TO_CHECK="${{ inputs.path }}"
+        CHANGED=""
+        
+        if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+          # Branch exists on origin, compare against it
+          BASE_SHA=$(git merge-base "origin/$BRANCH" HEAD 2>/dev/null || echo "")
+          if [[ -n "$BASE_SHA" ]] && [[ "$BASE_SHA" != "$(git rev-parse HEAD)" ]]; then
+            # Compare against branch's previous commit
+            CHANGED=$(git diff --name-only "$BASE_SHA" HEAD | grep "^${PATH_TO_CHECK}/" || true)
+          fi
+        fi
+        
+        # If no changes detected, check if files exist (for first-time deployments)
+        if [[ -z "$CHANGED" ]]; then
+          # Check if files exist in current commit
+          if git ls-tree -r --name-only HEAD | grep -q "^${PATH_TO_CHECK}/"; then
+            # Files exist, check if this is different from main (in case branches have same commits)
+            if git rev-parse --verify "origin/main" >/dev/null 2>&1; then
+              MAIN_SHA=$(git rev-parse "origin/main")
+              CURRENT_SHA=$(git rev-parse HEAD)
+              # If current commit is different from main, or if main doesn't have these files, deploy
+              if [[ "$CURRENT_SHA" != "$MAIN_SHA" ]] || ! git ls-tree -r --name-only "$MAIN_SHA" | grep -q "^${PATH_TO_CHECK}/"; then
+                CHANGED="${PATH_TO_CHECK}/"
+                echo "${PATH_TO_CHECK} files exist and differ from main - deploying"
+              fi
+            else
+              # No main branch, but files exist - deploy
+              CHANGED="${PATH_TO_CHECK}/"
+              echo "${PATH_TO_CHECK} files exist - deploying"
+            fi
+          fi
+        fi
+
+        if [[ -z "$CHANGED" ]]; then
+          echo "${PATH_TO_CHECK} not changed."
+          echo "has_changes=false" >> $GITHUB_OUTPUT
+        else
+          echo "${PATH_TO_CHECK} has changes."
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+        fi

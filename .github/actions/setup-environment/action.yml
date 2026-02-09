@@ -1,0 +1,76 @@
+name: Setup Environment
+description: Determines environment configuration based on repository and branch
+
+inputs:
+  repository:
+    required: true
+    description: Repository name (e.g., jktech-training/skill-matrix-V2)
+  branch:
+    required: true
+    description: Branch name (e.g., main, development)
+
+outputs:
+  repo_id:
+    description: Repository identifier for service naming
+    value: ${{ steps.config.outputs.repo_id }}
+  environment:
+    description: Environment name (production or development)
+    value: ${{ steps.config.outputs.environment }}
+  env_prefix:
+    description: Environment prefix for function names
+    value: ${{ steps.config.outputs.env_prefix }}
+  cloud_run_service:
+    description: Cloud Run service name
+    value: ${{ steps.config.outputs.cloud_run_service }}
+  image_suffix:
+    description: Docker image suffix
+    value: ${{ steps.config.outputs.image_suffix }}
+  bucket_name:
+    description: GCS bucket name
+    value: ${{ steps.config.outputs.bucket_name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Determine Configuration
+      id: config
+      shell: bash
+      run: |
+        REPO="${{ inputs.repository }}"
+        BRANCH="${{ inputs.branch }}"
+        
+        # Determine repository identifier for service naming
+        if [[ "$REPO" == *"skill-matrix-V2"* ]]; then
+          REPO_ID="skill-matrix-V2"
+        else
+          REPO_ID="skill-matrix"
+        fi
+        
+        if [[ "$BRANCH" == "main" ]]; then
+          ENV="production"
+          ENV_PREFIX=""
+          CLOUD_RUN_SERVICE="$REPO_ID"
+          IMAGE_SUFFIX=""
+          BUCKET_NAME="skill_matrix"
+        else
+          ENV="development"
+          ENV_PREFIX="dev_"
+          CLOUD_RUN_SERVICE="${REPO_ID}-dev"
+          IMAGE_SUFFIX="-dev"
+          BUCKET_NAME="dev_skill_matrix"
+        fi
+        
+        # Convert Cloud Run service name to lowercase (Cloud Run requires lowercase names)
+        CLOUD_RUN_SERVICE=$(echo "$CLOUD_RUN_SERVICE" | tr '[:upper:]' '[:lower:]')
+        
+        echo "repo_id=$REPO_ID" >> $GITHUB_OUTPUT
+        echo "environment=$ENV" >> $GITHUB_OUTPUT
+        echo "env_prefix=$ENV_PREFIX" >> $GITHUB_OUTPUT
+        echo "cloud_run_service=$CLOUD_RUN_SERVICE" >> $GITHUB_OUTPUT
+        echo "image_suffix=$IMAGE_SUFFIX" >> $GITHUB_OUTPUT
+        echo "bucket_name=$BUCKET_NAME" >> $GITHUB_OUTPUT
+        
+        echo "Environment: $ENV"
+        echo "Branch: $BRANCH"
+        echo "Repository: $REPO"
+        echo "Cloud Run Service: $CLOUD_RUN_SERVICE"

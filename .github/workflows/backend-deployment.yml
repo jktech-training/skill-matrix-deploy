@@ -1,0 +1,207 @@
+name: Deploy Backend Functions
+
+on:
+  repository_dispatch:
+    types: [deploy-backend, trigger-from-private]
+  workflow_dispatch:
+    inputs:
+      repository:
+        required: false
+        type: string
+        default: 'jktech-training/skill-matrix-V2'
+      branch:
+        required: false
+        type: string
+        default: 'main'
+      deployment_type:
+        required: false
+        type: choice
+        options:
+          - backend
+          - frontend
+          - full
+        default: 'backend'
+  workflow_call:
+    inputs:
+      repository:
+        required: false
+        type: string
+        default: 'jktech-training/skill-matrix-V2'
+      branch:
+        required: false
+        type: string
+        default: 'main'
+      deployment_type:
+        required: false
+        type: string
+        default: 'backend'
+
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Extract Repository Info
+        id: repo-info
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+            REPO="${{ inputs.repository }}"
+            BRANCH="${{ inputs.branch }}"
+          else
+            REPO="${{ github.event.client_payload.repository || github.event.inputs.repository || 'jktech-training/skill-matrix-V2' }}"
+            BRANCH="${{ github.event.client_payload.ref || github.event.inputs.branch || 'main' }}"
+          fi
+          echo "repository=$REPO" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.repo-info.outputs.repository }}
+          ref: ${{ steps.repo-info.outputs.branch }}
+          token: ${{ secrets.PRIVATETOKENPULL }}
+
+      - name: Setup Environment
+        id: env
+        uses: ./.github/actions/setup-environment
+        with:
+          repository: ${{ steps.repo-info.outputs.repository }}
+          branch: ${{ steps.repo-info.outputs.branch }}
+
+      - name: Detect Backend Changes
+        id: changes
+        uses: ./.github/actions/detect-changes
+        with:
+          branch: ${{ steps.repo-info.outputs.branch }}
+          path: backend
+
+      - name: Setup Database Credentials
+        if: steps.changes.outputs.has_changes == 'true'
+        id: db
+        uses: ./.github/actions/setup-db-credentials
+        with:
+          repository: ${{ steps.repo-info.outputs.repository }}
+          branch: ${{ steps.repo-info.outputs.branch }}
+          db_prod: ${{ secrets.DB_PROD }}
+          db_dev: ${{ secrets.DB_DEV }}
+          db_dev_v2: ${{ secrets.DB_DEV_V2 }}
+          base_url: ${{ secrets.BASE_URL }}
+          send_email_url: ${{ secrets.SEND_EMAIL_URL }}
+          app_url: ${{ secrets.APP_URL }}
+          email_template: ${{ secrets.EMAIL_TEMPLATE }}
+
+      - name: Setup Google Cloud
+        if: steps.changes.outputs.has_changes == 'true'
+        uses: ./.github/actions/setup-gcp
+        with:
+          gcp_sakey: ${{ secrets.GCP_SAKEY }}
+          project_id: training-project-419308
+
+      - name: Skip Deployment - No Changes Detected
+        if: steps.changes.outputs.has_changes != 'true'
+        run: |
+          echo "⏭️  No changes detected in backend/ directory"
+          echo "Skipping backend deployment"
+
+      - name: Deploy Backend Functions
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          echo "Detecting and deploying changed Cloud Functions in backend/..."
+          echo "Environment: ${{ steps.env.outputs.environment }}"
+          echo "Function prefix: ${{ steps.env.outputs.env_prefix }}"
+          
+          git fetch --unshallow || true
+          
+          # Source helper functions
+          source .github/scripts/function-helpers.sh
+          
+          DEPLOYED_COUNT=0
+          SKIPPED_COUNT=0
+          
+          # Find all directories containing main.py
+          find backend -type f -name "main.py" | while read -r MAIN_FILE; do
+            fn_dir=$(dirname "$MAIN_FILE")
+            fn_folder=$(basename "$fn_dir")
+            
+            # Check for changes
+            if ! has_changes "$fn_dir" "${{ steps.repo-info.outputs.branch }}"; then
+              echo "⏭️  Skipping $fn_folder (no changes detected)"
+              ((SKIPPED_COUNT++)) || true
+              continue
+            fi
+            
+            echo "📝 Changes detected in $fn_folder"
+            
+            # Extract entry point
+            ENTRY_POINT=$(extract_entry_point "$MAIN_FILE")
+            
+            if [[ -z "$ENTRY_POINT" ]]; then
+              echo "⚠️  No entry point found in $MAIN_FILE. Skipping..."
+              ((SKIPPED_COUNT++)) || true
+              continue
+            fi
+            
+            # Build function name
+            FUNCTION_NAME=$(build_function_name "$fn_folder" "$ENTRY_POINT" "${{ steps.env.outputs.env_prefix }}")
+            
+            # Get required env vars
+            REQUIRED_ENV_VARS=$(get_function_env_vars "$MAIN_FILE" "$fn_dir")
+            FUNCTION_ENV_VARS=$(build_function_env_vars "$REQUIRED_ENV_VARS" "${{ steps.db.outputs.db_env_vars }}" "${{ steps.env.outputs.environment }}")
+            
+            # Add BUCKET_NAME if function requires it
+            BUCKET_NAME="${{ steps.env.outputs.bucket_name }}"
+            if grep -q "BUCKET_NAME" <<< "$REQUIRED_ENV_VARS"; then
+              FUNCTION_ENV_VARS="${FUNCTION_ENV_VARS},BUCKET_NAME=${BUCKET_NAME}"
+            fi
+            
+            echo "🚀 Deploying $FUNCTION_NAME from $fn_folder"
+            echo "   Entry point: $ENTRY_POINT"
+            echo "   Environment: ${{ steps.env.outputs.environment }}"
+            
+            # Deploy function
+            if is_bucket_trigger "$MAIN_FILE" "$fn_dir"; then
+              echo "   Trigger: Cloud Storage (bucket)"
+              
+              gcloud functions deploy "$FUNCTION_NAME" \
+                --runtime python310 \
+                --trigger-bucket ${BUCKET_NAME} \
+                --entry-point "$ENTRY_POINT" \
+                --source "$fn_dir" \
+                --service-account training-project-419308@appspot.gserviceaccount.com \
+                --region asia-south1 \
+                --no-gen2 \
+                --memory 512MB \
+                --timeout 540s \
+                --set-env-vars "$FUNCTION_ENV_VARS" \
+                --quiet
+            else
+              echo "   Trigger: HTTP"
+              
+              gcloud functions deploy "$FUNCTION_NAME" \
+                --runtime python310 \
+                --trigger-http \
+                --entry-point "$ENTRY_POINT" \
+                --source "$fn_dir" \
+                --service-account training-project-419308@appspot.gserviceaccount.com \
+                --allow-unauthenticated \
+                --no-gen2 \
+                --region asia-south1 \
+                --set-env-vars "$FUNCTION_ENV_VARS" \
+                --quiet
+            fi
+            
+            if [[ $? -eq 0 ]]; then
+              echo "✅ Successfully deployed: $FUNCTION_NAME"
+              ((DEPLOYED_COUNT++)) || true
+            else
+              echo "❌ Failed to deploy: $FUNCTION_NAME"
+              ((SKIPPED_COUNT++)) || true
+            fi
+          done
+          
+          echo ""
+          echo "📊 Backend Deployment Summary:"
+          echo "   Environment: ${{ steps.env.outputs.environment }}"
+          echo "   Deployed: $DEPLOYED_COUNT functions"
+          echo "   Skipped: $SKIPPED_COUNT functions"
