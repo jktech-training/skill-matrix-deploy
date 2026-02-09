@@ -246,8 +246,26 @@ jobs:
       - name: Build and Push Docker Image
         if: steps.check_frontend.outputs.has_changes == 'true'
         run: |
+          # Determine VITE_BASE_URL with appropriate prefix
+          BASE_URL="${{ secrets.VITE_BASE_URL }}"
+          ENV_PREFIX="${{ needs.setup.outputs.env_prefix }}"
+          ENV="${{ needs.setup.outputs.env }}"
+          
+          # If development, append dev_ prefix to base URL
+          if [[ "$ENV" == "development" ]]; then
+            # Ensure base URL ends with /
+            if [[ "$BASE_URL" != */ ]]; then
+              BASE_URL="${BASE_URL}/"
+            fi
+            # Append dev_ prefix
+            BASE_URL="${BASE_URL}${ENV_PREFIX}"
+            echo "Development mode: Using BASE_URL with prefix: $BASE_URL"
+          else
+            echo "Production mode: Using BASE_URL as-is: $BASE_URL"
+          fi
+          
           docker build \
-            --build-arg VITE_BASE_URL="${{ secrets.VITE_BASE_URL }}" \
+            --build-arg VITE_BASE_URL="$BASE_URL" \
             --build-arg VITE_SSO_URL="${{ secrets.VITE_SSO_URL }}" \
             -t asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG} \
             ./frontend
