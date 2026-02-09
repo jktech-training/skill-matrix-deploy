@@ -158,7 +158,7 @@ jobs:
 
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
-        with:
+    with:
           project_id: training-project-419308
 
   # ============================================
@@ -314,7 +314,7 @@ jobs:
 
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
-        with:
+    with:
           project_id: training-project-419308
 
       - name: Check for Changes in Backend
@@ -440,67 +440,69 @@ jobs:
             echo "$combined_vars"
           }
           
-          # Automatically builds env vars by detecting what's needed and fetching from secrets
-          build_function_env_vars() {
+          # Automatically builds env vars YAML file by detecting what's needed and fetching from secrets
+          build_function_env_vars_file() {
             local required_vars="$1"
             local db_env_vars="$2"
-            local function_env_vars="ENV=${{ needs.setup.outputs.env }}"
+            local env_vars_file="$3"
             
             # Debug: Check if db_env_vars is empty
             if [[ -z "$db_env_vars" ]]; then
-              echo "❌ ERROR in build_function_env_vars: db_env_vars is empty!"
-              echo "$function_env_vars"
-              return
+              echo "❌ ERROR in build_function_env_vars_file: db_env_vars is empty!"
+              return 1
             fi
             
-            echo "🔍 Building function env vars..."
+            echo "🔍 Building function env vars YAML file..."
             echo "   Input db_env_vars length: ${#db_env_vars}"
-            echo "   Input preview: $(echo "$db_env_vars" | cut -c1-100)..."
             
-            # Parse DB env vars into a temp file
+            # Parse DB env vars - they should be in KEY=VALUE format (newline or comma separated)
+            # First, try to parse as newline-separated, then fallback to comma-separated
             local temp_file=$(mktemp)
-            # Normalize: remove newlines, normalize spaces, convert to comma-separated
-            db_env_vars=$(echo "$db_env_vars" | tr '\n' ' ' | sed 's/  */ /g' | tr ' ' ',')
-            # Split on comma followed by uppercase letter or underscore (start of new KEY=)
-            echo "$db_env_vars" | sed 's/,\([A-Z_][A-Z_]*=\)/\n\1/g' | grep '=' > "$temp_file" || {
-              # Fallback: simple comma split
-              echo "$db_env_vars" | tr ',' '\n' | grep '=' > "$temp_file"
-            }
             
-            # Debug: Show what was parsed
-            echo "   Parsed variables:"
-            while IFS= read -r line; do
-              var_name=$(echo "$line" | cut -d'=' -f1)
-              if [[ "$var_name" == "DB_PASS" ]] || [[ "$var_name" == "DB_USER" ]]; then
-                echo "     $var_name=***"
-              else
-                echo "     $line"
-              fi
-            done < "$temp_file" | head -10
+            # If db_env_vars contains newlines, use them; otherwise treat as comma-separated
+            if echo "$db_env_vars" | grep -q $'\n'; then
+              # Newline-separated format
+              echo "$db_env_vars" | grep '=' > "$temp_file"
+            else
+              # Comma-separated format - split carefully on comma followed by KEY= pattern
+              echo "$db_env_vars" | sed 's/,\([A-Z_][A-Z_]*=\)/\n\1/g' | grep '=' > "$temp_file" || {
+                # Last resort: simple comma split (may break on values with commas)
+                echo "$db_env_vars" | tr ',' '\n' | grep '=' > "$temp_file"
+              }
+            fi
+            
+            # Start building YAML file
+            echo "ENV: ${{ needs.setup.outputs.env }}" > "$env_vars_file"
             
             # ALWAYS include base DB variables first
             local base_db_vars=("DB_HOST" "DB_USER" "DB_PASS" "DB_NAME" "DB_PORT" "DB_SCHEMA")
             local added_count=0
             for var in "${base_db_vars[@]}"; do
+              # Extract the full line with KEY=VALUE
               var_line=$(grep "^${var}=" "$temp_file" | head -n1)
               if [[ -n "$var_line" ]]; then
-                var_pair=$(echo "$var_line" | cut -d'=' -f1-)
-                if [[ -n "$var_pair" ]]; then
-                  function_env_vars="${function_env_vars},${var_pair}"
+                # Extract value (everything after first =)
+                var_value=$(echo "$var_line" | cut -d'=' -f2-)
+                if [[ -n "$var_value" ]]; then
+                  # For YAML, use double quotes and escape them properly
+                  # Replace " with \" and \ with \\
+                  var_value=$(echo "$var_value" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                  # Add to YAML file with double quotes
+                  echo "${var}: \"${var_value}\"" >> "$env_vars_file"
                   echo "   ✅ Added base DB variable: $var"
                   ((added_count++)) || true
                 else
-                  echo "   ⚠️  Warning: Could not extract value for $var from '$var_line'"
+                  echo "   ⚠️  Warning: Empty value for $var"
                 fi
               else
-                echo "   ⚠️  Warning: Base DB variable $var not found in temp file"
+                echo "   ⚠️  Warning: Base DB variable $var not found"
               fi
             done
             
             if [[ $added_count -eq 0 ]]; then
               echo "   ❌ ERROR: No base DB variables were added!"
-              echo "   Temp file contents:"
-              cat "$temp_file" | head -10
+              rm -f "$temp_file" "$env_vars_file"
+              return 1
             fi
             
             # Then add other detected variables - automatically fetch from secrets
@@ -525,14 +527,15 @@ jobs:
               var_line=$(grep "^${var}=" "$temp_file" | head -n1)
               if [[ -n "$var_line" ]]; then
                 # Found in DB secret, use it
-                var_pair=$(echo "$var_line" | cut -d'=' -f1-)
-                if [[ -n "$var_pair" ]]; then
-                  function_env_vars="${function_env_vars},${var_pair}"
-                  echo "✅ Added $var from DB secret"
+                var_value=$(echo "$var_line" | cut -d'=' -f2-)
+                if [[ -n "$var_value" ]]; then
+                  # For YAML, use double quotes and escape them properly
+                  var_value=$(echo "$var_value" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                  echo "${var}: \"${var_value}\"" >> "$env_vars_file"
+                  echo "   ✅ Added $var from DB secret"
                 fi
               else
                 # Not in DB secret, try to get from individual secret
-                # Use GitHub Actions secret context - check if secret exists
                 secret_value=""
                 case "$var" in
                   BASE_URL)
@@ -552,23 +555,22 @@ jobs:
                     continue
                     ;;
                   *)
-                    # Try to get secret with same name as variable
-                    # Note: GitHub Actions doesn't support dynamic secret access,
-                    # so we need to explicitly list known secrets
-                    echo "⚠️  Variable $var detected but not found in secrets (add to workflow if needed)"
+                    echo "   ⚠️  Variable $var detected but not found in secrets (add to workflow if needed)"
                     continue
                     ;;
                 esac
                 
                 if [[ -n "$secret_value" ]]; then
-                  function_env_vars="${function_env_vars},${var}=${secret_value}"
-                  echo "✅ Added $var from individual secret"
+                  # For YAML, use double quotes and escape them properly
+                  secret_value=$(echo "$secret_value" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                  echo "${var}: \"${secret_value}\"" >> "$env_vars_file"
+                  echo "   ✅ Added $var from individual secret"
                 fi
               fi
             done
             
             rm -f "$temp_file"
-            echo "$function_env_vars"
+            echo "$env_vars_file"
           }
           
           # Function to check if function uses bucket trigger
@@ -707,28 +709,34 @@ jobs:
               echo "✅ Retrieved DB credentials directly from secrets (length: ${#DB_ENV_VARS_FROM_SECRETS} chars)"
             fi
             
-            # Build function environment variables (includes DB credentials from secrets)
-            FUNCTION_ENV_VARS=$(build_function_env_vars "$REQUIRED_ENV_VARS" "$DB_ENV_VARS_FROM_SECRETS")
+            # Build function environment variables YAML file (includes DB credentials from secrets)
+            ENV_VARS_FILE=$(mktemp)
+            if ! build_function_env_vars_file "$REQUIRED_ENV_VARS" "$DB_ENV_VARS_FROM_SECRETS" "$ENV_VARS_FILE"; then
+              echo "❌ ERROR: Failed to build environment variables file!"
+              exit 1
+            fi
             
-            # Verify DB credentials are included
-            if [[ "$FUNCTION_ENV_VARS" == *"DB_HOST="* ]] && \
-               [[ "$FUNCTION_ENV_VARS" == *"DB_USER="* ]] && \
-               [[ "$FUNCTION_ENV_VARS" == *"DB_PASS="* ]] && \
-               [[ "$FUNCTION_ENV_VARS" == *"DB_NAME="* ]]; then
+            # Verify DB credentials are included in the YAML file
+            if grep -q "^DB_HOST:" "$ENV_VARS_FILE" && \
+               grep -q "^DB_USER:" "$ENV_VARS_FILE" && \
+               grep -q "^DB_PASS:" "$ENV_VARS_FILE" && \
+               grep -q "^DB_NAME:" "$ENV_VARS_FILE"; then
               echo "✅ Verified: DB credentials from secrets are included"
-              # Debug: Show env vars (mask sensitive values)
-              FUNCTION_ENV_VARS_DEBUG=$(echo "$FUNCTION_ENV_VARS" | sed 's/\(DB_PASS=[^,]*\)/DB_PASS=***/g' | sed 's/\(DB_USER=[^,]*\)/DB_USER=***/g')
-              echo "   Final env vars preview: $(echo "$FUNCTION_ENV_VARS_DEBUG" | cut -c1-300)..."
+              echo "   Environment variables file created: $ENV_VARS_FILE"
+              echo "   Variables in file:"
+              grep -E "^[A-Z_]+:" "$ENV_VARS_FILE" | sed 's/\(DB_PASS:\).*/DB_PASS:***/' | sed 's/\(DB_USER:\).*/DB_USER:***/' | head -10
             else
-              echo "❌ ERROR: DB credentials missing from function env vars!"
-              echo "   FUNCTION_ENV_VARS content: $(echo "$FUNCTION_ENV_VARS" | cut -c1-200)"
+              echo "❌ ERROR: DB credentials missing from environment variables file!"
+              echo "   File contents:"
+              cat "$ENV_VARS_FILE"
+              rm -f "$ENV_VARS_FILE"
               exit 1
             fi
             
             # Add BUCKET_NAME if function requires it (for bucket trigger functions or uploadCv)
             BUCKET_NAME="${{ needs.setup.outputs.bucket_name }}"
             if grep -q "BUCKET_NAME" <<< "$REQUIRED_ENV_VARS"; then
-              FUNCTION_ENV_VARS="${FUNCTION_ENV_VARS},BUCKET_NAME=${BUCKET_NAME}"
+              echo "BUCKET_NAME: \"${BUCKET_NAME}\"" >> "$ENV_VARS_FILE"
             fi
             
             echo "🚀 Deploying $FUNCTION_NAME from $fn_folder"
@@ -736,11 +744,6 @@ jobs:
             echo "   Environment: ${{ needs.setup.outputs.env }}"
             echo "   Directory: $fn_dir"
             echo "   Required env vars: $REQUIRED_ENV_VARS"
-            echo "   FUNCTION_ENV_VARS to deploy:"
-            FUNCTION_ENV_VARS_DEBUG=$(echo "$FUNCTION_ENV_VARS" | sed 's/\(DB_PASS=[^,]*\)/DB_PASS=***/g' | sed 's/\(DB_USER=[^,]*\)/DB_USER=***/g')
-            echo "$FUNCTION_ENV_VARS_DEBUG" | tr ',' '\n' | while IFS= read -r line; do
-              echo "     $line"
-            done
             
             # Check if it's a bucket trigger function
             if is_bucket_trigger "$MAIN_FILE" "$fn_dir"; then
@@ -756,8 +759,11 @@ jobs:
                 --no-gen2 \
                 --memory 512MB \
                 --timeout 540s \
-                --set-env-vars "$FUNCTION_ENV_VARS" \
+                --env-vars-file "$ENV_VARS_FILE" \
                 --quiet
+              
+              # Clean up temp file
+              rm -f "$ENV_VARS_FILE"
               
               if [[ $? -eq 0 ]]; then
                 echo "✅ Successfully deployed: $FUNCTION_NAME (bucket trigger)"
@@ -778,8 +784,11 @@ jobs:
                 --allow-unauthenticated \
                 --no-gen2 \
                 --region asia-south1 \
-                --set-env-vars "$FUNCTION_ENV_VARS" \
+                --env-vars-file "$ENV_VARS_FILE" \
                 --quiet
+              
+              # Clean up temp file
+              rm -f "$ENV_VARS_FILE"
               
               if [[ $? -eq 0 ]]; then
                 # Ensure public access with IAM policy binding
