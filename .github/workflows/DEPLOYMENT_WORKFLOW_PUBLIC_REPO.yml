@@ -23,7 +23,6 @@ jobs:
       cloud_run_service: ${{ steps.env.outputs.cloud_run_service }}
       image_suffix: ${{ steps.env.outputs.image_suffix }}
       bucket_name: ${{ steps.env.outputs.bucket_name }}
-      db_env_vars: ${{ steps.db.outputs.db_env_vars }}
 
     steps:
       - name: Checkout Code
@@ -94,62 +93,6 @@ jobs:
           echo "Branch: $BRANCH"
           echo "Repository: $REPO"
           echo "Cloud Run Service: $CLOUD_RUN_SERVICE"
-
-      - name: Set Database Credentials
-        id: db
-        run: |
-          REPO="${{ steps.env.outputs.repo }}"
-          BRANCH="${{ steps.env.outputs.branch }}"
-          
-          echo "📋 Auto-detecting and retrieving DB credentials from secrets..."
-          echo "Repository: $REPO"
-          echo "Branch: $BRANCH"
-          
-          # Automatically determine which DB credentials secret to use based on repo and branch
-          if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
-            DB_SECRET_NAME="DB_PROD"
-          elif [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" != "main" ]]; then
-            DB_SECRET_NAME="DB_DEV"
-          elif [[ "$REPO" == "jktech-training/skill-matrix-V2" ]] && [[ "$BRANCH" != "main" ]]; then
-            DB_SECRET_NAME="DB_DEV_V2"
-          else
-            DB_SECRET_NAME="DB_DEV_V2"
-          fi
-          
-          echo "✅ Using $DB_SECRET_NAME secret for DB credentials"
-          
-          # Get DB credentials from the appropriate secret
-          case "$DB_SECRET_NAME" in
-            DB_PROD)
-              DB_ENV_VARS="${{ secrets.DB_PROD }}"
-              ;;
-            DB_DEV)
-              DB_ENV_VARS="${{ secrets.DB_DEV }}"
-              ;;
-            DB_DEV_V2)
-              DB_ENV_VARS="${{ secrets.DB_DEV_V2 }}"
-              ;;
-          esac
-          
-          # Verify secret was retrieved
-          if [[ -z "$DB_ENV_VARS" ]]; then
-            echo "❌ ERROR: DB credentials secret ($DB_SECRET_NAME) is empty!"
-            exit 1
-          fi
-          
-          # Convert newlines to commas for gcloud --set-env-vars format
-          DB_ENV_VARS=$(echo "$DB_ENV_VARS" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '\n' ',' | sed 's/,$//')
-          
-          echo "✅ DB credentials retrieved and processed (length: ${#DB_ENV_VARS} characters)"
-          
-          # Store as output for use in deployment jobs
-          {
-            echo "db_env_vars<<EOF"
-            echo "$DB_ENV_VARS"
-            echo "EOF"
-          } >> $GITHUB_OUTPUT
-          
-          echo "✅ Environment variables ready for deployment"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -316,7 +259,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: training-project-419308
-          
+
       - name: Check for Changes in Backend
         id: check_backend
         run: |
@@ -455,21 +398,22 @@ jobs:
             echo "🔍 Building function env vars YAML file..."
             echo "   Input db_env_vars length: ${#db_env_vars}"
             
-            # Parse DB env vars - they should be in KEY=VALUE format (newline or comma separated)
-            # First, try to parse as newline-separated, then fallback to comma-separated
+            # Parse DB env vars - they are in KEY=VALUE format (newline-separated from secrets)
             local temp_file=$(mktemp)
             
-            # If db_env_vars contains newlines, use them; otherwise treat as comma-separated
-            if echo "$db_env_vars" | grep -q $'\n'; then
-              # Newline-separated format
-              echo "$db_env_vars" | grep '=' > "$temp_file"
-            else
-              # Comma-separated format - split carefully on comma followed by KEY= pattern
-              echo "$db_env_vars" | sed 's/,\([A-Z_][A-Z_]*=\)/\n\1/g' | grep '=' > "$temp_file" || {
-                # Last resort: simple comma split (may break on values with commas)
-                echo "$db_env_vars" | tr ',' '\n' | grep '=' > "$temp_file"
-              }
-            fi
+            # Secrets are in newline-separated KEY=VALUE format, just filter for lines with =
+            echo "$db_env_vars" | grep '=' > "$temp_file"
+            
+            # Debug: Show what was parsed
+            echo "   Parsed variables from secrets (first 10):"
+            head -10 "$temp_file" | while IFS= read -r line; do
+              var_name=$(echo "$line" | cut -d'=' -f1)
+              if [[ "$var_name" == "DB_PASS" ]] || [[ "$var_name" == "DB_USER" ]]; then
+                echo "     $var_name=***"
+              else
+                echo "     $line"
+              fi
+            done
             
             # Start building YAML file
             echo "ENV: ${{ needs.setup.outputs.env }}" > "$env_vars_file"
@@ -671,43 +615,37 @@ jobs:
             # Detect required environment variables for this function
             REQUIRED_ENV_VARS=$(get_function_env_vars "$MAIN_FILE" "$fn_dir")
             
-            # Automatically get DB credentials (from setup job or fallback to secrets)
-            DB_ENV_VARS_FROM_SECRETS="${{ needs.setup.outputs.db_env_vars }}"
+            # Get DB credentials directly from secrets (no setup job dependency)
+            echo "📋 Retrieving DB credentials directly from secrets..."
+            REPO="${{ needs.setup.outputs.repo }}"
+            BRANCH="${{ needs.setup.outputs.branch }}"
             
-            # Debug: Check what we got from setup job
-            if [[ -n "$DB_ENV_VARS_FROM_SECRETS" ]]; then
-              echo "📋 Received DB credentials from setup job (length: ${#DB_ENV_VARS_FROM_SECRETS} chars)"
-              echo "   Preview: $(echo "$DB_ENV_VARS_FROM_SECRETS" | cut -c1-150)..."
+            # Auto-determine which DB secret to use based on repo and branch
+            if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
+              DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_PROD }}"
+              echo "✅ Using DB_PROD secret for: skill-matrix (main/production)"
+            elif [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" != "main" ]]; then
+              DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV }}"
+              echo "✅ Using DB_DEV secret for: skill-matrix (development)"
+            elif [[ "$REPO" == "jktech-training/skill-matrix-V2" ]] && [[ "$BRANCH" != "main" ]]; then
+              DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV_V2 }}"
+              echo "✅ Using DB_DEV_V2 secret for: skill-matrix-V2 (development)"
             else
-              echo "📋 DB credentials not in setup output, retrieving directly from secrets..."
-              
-              # Auto-determine which DB secret to use
-              REPO="${{ needs.setup.outputs.repo }}"
-              BRANCH="${{ needs.setup.outputs.branch }}"
-              
-              if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
-                DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_PROD }}"
-                echo "   Using DB_PROD secret"
-              elif [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" != "main" ]]; then
-                DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV }}"
-                echo "   Using DB_DEV secret"
-              elif [[ "$REPO" == "jktech-training/skill-matrix-V2" ]] && [[ "$BRANCH" != "main" ]]; then
-                DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV_V2 }}"
-                echo "   Using DB_DEV_V2 secret"
-              else
-                DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV_V2 }}"
-                echo "   Using DB_DEV_V2 secret (default)"
-              fi
-              
-              # Process the secret
-              DB_ENV_VARS_FROM_SECRETS=$(echo "$DB_ENV_VARS_FROM_SECRETS" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '\n' ',' | sed 's/,$//')
-              
-              if [[ -z "$DB_ENV_VARS_FROM_SECRETS" ]]; then
-                echo "❌ ERROR: Failed to retrieve DB credentials from secrets!"
-                exit 1
-              fi
-              echo "✅ Retrieved DB credentials directly from secrets (length: ${#DB_ENV_VARS_FROM_SECRETS} chars)"
+              DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV_V2 }}"
+              echo "✅ Using DB_DEV_V2 secret (default/fallback)"
             fi
+            
+            # Verify secret was retrieved
+            if [[ -z "$DB_ENV_VARS_FROM_SECRETS" ]]; then
+              echo "❌ ERROR: DB credentials secret is empty!"
+              exit 1
+            fi
+            
+            # Keep secrets in original format (newline-separated, no conversion to comma)
+            # Just clean up empty lines and trim whitespace
+            DB_ENV_VARS_FROM_SECRETS=$(echo "$DB_ENV_VARS_FROM_SECRETS" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            
+            echo "✅ DB credentials retrieved from secrets (length: ${#DB_ENV_VARS_FROM_SECRETS} chars)"
             
             # Build function environment variables YAML file (includes DB credentials from secrets)
             ENV_VARS_FILE=$(mktemp)
