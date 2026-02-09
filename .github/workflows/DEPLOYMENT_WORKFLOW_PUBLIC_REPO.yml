@@ -101,53 +101,55 @@ jobs:
           REPO="${{ steps.env.outputs.repo }}"
           BRANCH="${{ steps.env.outputs.branch }}"
           
-          # Determine which DB credentials secret to use based on repo and branch
+          echo "📋 Auto-detecting and retrieving DB credentials from secrets..."
+          echo "Repository: $REPO"
+          echo "Branch: $BRANCH"
+          
+          # Automatically determine which DB credentials secret to use based on repo and branch
           if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
-            # skill-matrix main branch - use DB_PROD
-            DB_ENV_VARS="${{ secrets.DB_PROD }}"
-            echo "Using DB credentials for: skill-matrix (main/production)"
+            DB_SECRET_NAME="DB_PROD"
           elif [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" != "main" ]]; then
-            # skill-matrix development branch - use DB_DEV
-            DB_ENV_VARS="${{ secrets.DB_DEV }}"
-            echo "Using DB credentials for: skill-matrix (development)"
+            DB_SECRET_NAME="DB_DEV"
           elif [[ "$REPO" == "jktech-training/skill-matrix-V2" ]] && [[ "$BRANCH" != "main" ]]; then
-            # skill-matrix-V2 development branch - use DB_DEV_V2
-            DB_ENV_VARS="${{ secrets.DB_DEV_V2 }}"
-            echo "Using DB credentials for: skill-matrix-V2 (development)"
+            DB_SECRET_NAME="DB_DEV_V2"
           else
-            # Fallback to DB_DEV_V2 for skill-matrix-V2 main if needed
-            DB_ENV_VARS="${{ secrets.DB_DEV_V2 }}"
-            echo "Using default DB credentials (DB_DEV_V2)"
+            DB_SECRET_NAME="DB_DEV_V2"
+          fi
+          
+          echo "✅ Using $DB_SECRET_NAME secret for DB credentials"
+          
+          # Get DB credentials from the appropriate secret
+          case "$DB_SECRET_NAME" in
+            DB_PROD)
+              DB_ENV_VARS="${{ secrets.DB_PROD }}"
+              ;;
+            DB_DEV)
+              DB_ENV_VARS="${{ secrets.DB_DEV }}"
+              ;;
+            DB_DEV_V2)
+              DB_ENV_VARS="${{ secrets.DB_DEV_V2 }}"
+              ;;
+          esac
+          
+          # Verify secret was retrieved
+          if [[ -z "$DB_ENV_VARS" ]]; then
+            echo "❌ ERROR: DB credentials secret ($DB_SECRET_NAME) is empty!"
+            exit 1
           fi
           
           # Convert newlines to commas for gcloud --set-env-vars format
-          # Remove empty lines and trim whitespace, then join with commas
           DB_ENV_VARS=$(echo "$DB_ENV_VARS" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '\n' ',' | sed 's/,$//')
           
-          # Add environment-specific variables if they exist in separate secrets
-          BASE_URL_SECRET="${{ secrets.BASE_URL }}"
-          SEND_EMAIL_URL_SECRET="${{ secrets.SEND_EMAIL_URL }}"
-          APP_URL_SECRET="${{ secrets.APP_URL }}"
-          EMAIL_TEMPLATE_SECRET="${{ secrets.EMAIL_TEMPLATE }}"
+          echo "✅ DB credentials retrieved and processed (length: ${#DB_ENV_VARS} characters)"
           
-          if [[ "$DB_ENV_VARS" != *"BASE_URL="* ]] && [[ -n "$BASE_URL_SECRET" ]]; then
-            DB_ENV_VARS="$DB_ENV_VARS,BASE_URL=$BASE_URL_SECRET"
-          fi
+          # Store as output for use in deployment jobs
+          {
+            echo "db_env_vars<<EOF"
+            echo "$DB_ENV_VARS"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
           
-          if [[ "$DB_ENV_VARS" != *"SEND_EMAIL_URL="* ]] && [[ -n "$SEND_EMAIL_URL_SECRET" ]]; then
-            DB_ENV_VARS="$DB_ENV_VARS,SEND_EMAIL_URL=$SEND_EMAIL_URL_SECRET"
-          fi
-          
-          if [[ "$DB_ENV_VARS" != *"APP_URL="* ]] && [[ -n "$APP_URL_SECRET" ]]; then
-            DB_ENV_VARS="$DB_ENV_VARS,APP_URL=$APP_URL_SECRET"
-          fi
-          
-          if [[ "$DB_ENV_VARS" != *"EMAIL_TEMPLATE="* ]] && [[ -n "$EMAIL_TEMPLATE_SECRET" ]]; then
-            DB_ENV_VARS="$DB_ENV_VARS,EMAIL_TEMPLATE=$EMAIL_TEMPLATE_SECRET"
-          fi
-          
-          echo "db_env_vars=$DB_ENV_VARS" >> $GITHUB_OUTPUT
-          echo "✅ Environment variables loaded successfully"
+          echo "✅ Environment variables ready for deployment"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -390,6 +392,7 @@ jobs:
           
           # Function to detect required environment variables for a function
           # Scans main.py for os.getenv() calls to determine what env vars are needed
+          # Automatically detects ALL environment variables needed by scanning os.getenv() calls
           get_function_env_vars() {
             local main_file="$1"
             local fn_dir="$2"
@@ -398,72 +401,144 @@ jobs:
             # Base DB variables (all functions need these)
             local base_vars="DB_HOST,DB_USER,DB_PASS,DB_NAME,DB_PORT,DB_SCHEMA"
             
-            # Check for specific env vars in main.py
-            if grep -q "os.getenv.*BASE_URL" "$main_file" 2>/dev/null; then
-              required_vars="${required_vars}BASE_URL,"
+            # Automatically detect ALL os.getenv() calls in the function code
+            # Extract variable names from patterns like: os.getenv('VAR_NAME') or os.getenv("VAR_NAME")
+            if [[ -f "$main_file" ]]; then
+              # Find all os.getenv calls and extract variable names
+              detected_vars=$(grep -oE "os\.getenv\(['\"]([A-Z_][A-Z0-9_]*)['\"]" "$main_file" 2>/dev/null | \
+                sed "s/os\.getenv(['\"]//" | sed "s/['\"]//" | sort -u | tr '\n' ',' | sed 's/,$//')
+              
+              if [[ -n "$detected_vars" ]]; then
+                echo "🔍 Auto-detected env vars from code: $detected_vars"
+                required_vars="$detected_vars"
+              fi
             fi
             
-            if grep -q "os.getenv.*SEND_EMAIL_URL" "$main_file" 2>/dev/null; then
-              required_vars="${required_vars}SEND_EMAIL_URL,"
-            fi
+            # Combine base vars with detected vars (avoid duplicates)
+            IFS=',' read -ra BASE_ARRAY <<< "$base_vars"
+            IFS=',' read -ra DETECTED_ARRAY <<< "$required_vars"
             
-            if grep -q "os.getenv.*APP_URL" "$main_file" 2>/dev/null; then
-              required_vars="${required_vars}APP_URL,"
-            fi
-            
-            if grep -q "os.getenv.*EMAIL_TEMPLATE" "$main_file" 2>/dev/null; then
-              required_vars="${required_vars}EMAIL_TEMPLATE,"
-            fi
-            
-            if grep -q "os.getenv.*BUCKET_NAME" "$main_file" 2>/dev/null; then
-              required_vars="${required_vars}BUCKET_NAME,"
-            fi
-            
-            # Combine base vars with function-specific vars
-            if [[ -n "$required_vars" ]]; then
-              required_vars="${base_vars},${required_vars}"
-            else
-              required_vars="$base_vars"
-            fi
+            local combined_vars="$base_vars"
+            for var in "${DETECTED_ARRAY[@]}"; do
+              var=$(echo "$var" | xargs) # trim whitespace
+              # Check if it's already in base vars
+              skip=false
+              for base_var in "${BASE_ARRAY[@]}"; do
+                if [[ "$var" == "$base_var" ]]; then
+                  skip=true
+                  break
+                fi
+              done
+              if [[ "$skip" == "false" ]] && [[ -n "$var" ]]; then
+                combined_vars="${combined_vars},${var}"
+              fi
+            done
             
             # Remove trailing comma
-            required_vars=$(echo "$required_vars" | sed 's/,$//')
+            combined_vars=$(echo "$combined_vars" | sed 's/,$//')
             
-            echo "$required_vars"
+            echo "$combined_vars"
           }
           
-          # Function to build env vars string for a specific function
-          # Extracts only the required variables from the full env vars string
+          # Automatically builds env vars by detecting what's needed and fetching from secrets
           build_function_env_vars() {
             local required_vars="$1"
-            local all_env_vars="$2"
+            local db_env_vars="$2"
             local function_env_vars="ENV=${{ needs.setup.outputs.env }}"
             
-            # Create a temporary file to parse env vars
+            # Debug: Check if db_env_vars is empty
+            if [[ -z "$db_env_vars" ]]; then
+              echo "❌ ERROR in build_function_env_vars: db_env_vars is empty!"
+              echo "$function_env_vars"
+              return
+            fi
+            
+            # Parse DB env vars into a temp file
             local temp_file=$(mktemp)
-            echo "$all_env_vars" | tr ',' '\n' > "$temp_file"
+            db_env_vars=$(echo "$db_env_vars" | tr '\n' ' ' | sed 's/  */ /g' | tr ' ' ',')
+            echo "$db_env_vars" | sed 's/,\([A-Z_][A-Z_]*=\)/\n\1/g' | grep '=' > "$temp_file" || {
+              echo "$db_env_vars" | tr ',' '\n' | grep '=' > "$temp_file"
+            }
             
-            # Split required vars into array
+            # ALWAYS include base DB variables first
+            local base_db_vars=("DB_HOST" "DB_USER" "DB_PASS" "DB_NAME" "DB_PORT" "DB_SCHEMA")
+            for var in "${base_db_vars[@]}"; do
+              var_line=$(grep "^${var}=" "$temp_file" | head -n1)
+              if [[ -n "$var_line" ]]; then
+                var_pair=$(echo "$var_line" | cut -d'=' -f1-)
+                if [[ -n "$var_pair" ]]; then
+                  function_env_vars="${function_env_vars},${var_pair}"
+                fi
+              else
+                echo "⚠️  Warning: Base DB variable $var not found"
+              fi
+            done
+            
+            # Then add other detected variables - automatically fetch from secrets
             IFS=',' read -ra REQUIRED <<< "$required_vars"
-            
-            # Add required variables from all_env_vars
             for var in "${REQUIRED[@]}"; do
               var=$(echo "$var" | xargs) # trim whitespace
-              if [[ -n "$var" ]]; then
-                # Find the variable in all_env_vars (handle both KEY=value and KEY=value, formats)
-                var_line=$(grep "^${var}=" "$temp_file" | head -n1)
-                if [[ -n "$var_line" ]]; then
-                  # Extract the full KEY=value pair
-                  var_pair=$(echo "$var_line" | cut -d'=' -f1-)
-                  if [[ -n "$var_pair" ]]; then
-                    function_env_vars="${function_env_vars},${var_pair}"
-                  fi
+              
+              # Skip base DB variables (already added)
+              skip=false
+              for base_var in "${base_db_vars[@]}"; do
+                if [[ "$var" == "$base_var" ]]; then
+                  skip=true
+                  break
+                fi
+              done
+              
+              if [[ "$skip" == "true" ]]; then
+                continue
+              fi
+              
+              # Check if variable exists in DB env vars (from DB secret)
+              var_line=$(grep "^${var}=" "$temp_file" | head -n1)
+              if [[ -n "$var_line" ]]; then
+                # Found in DB secret, use it
+                var_pair=$(echo "$var_line" | cut -d'=' -f1-)
+                if [[ -n "$var_pair" ]]; then
+                  function_env_vars="${function_env_vars},${var_pair}"
+                  echo "✅ Added $var from DB secret"
+                fi
+              else
+                # Not in DB secret, try to get from individual secret
+                # Use GitHub Actions secret context - check if secret exists
+                secret_value=""
+                case "$var" in
+                  BASE_URL)
+                    secret_value="${{ secrets.BASE_URL }}"
+                    ;;
+                  SEND_EMAIL_URL)
+                    secret_value="${{ secrets.SEND_EMAIL_URL }}"
+                    ;;
+                  APP_URL)
+                    secret_value="${{ secrets.APP_URL }}"
+                    ;;
+                  EMAIL_TEMPLATE)
+                    secret_value="${{ secrets.EMAIL_TEMPLATE }}"
+                    ;;
+                  BUCKET_NAME)
+                    # BUCKET_NAME is handled separately, skip here
+                    continue
+                    ;;
+                  *)
+                    # Try to get secret with same name as variable
+                    # Note: GitHub Actions doesn't support dynamic secret access,
+                    # so we need to explicitly list known secrets
+                    echo "⚠️  Variable $var detected but not found in secrets (add to workflow if needed)"
+                    continue
+                    ;;
+                esac
+                
+                if [[ -n "$secret_value" ]]; then
+                  function_env_vars="${function_env_vars},${var}=${secret_value}"
+                  echo "✅ Added $var from individual secret"
                 fi
               fi
             done
             
             rm -f "$temp_file"
-            
             echo "$function_env_vars"
           }
           
@@ -564,7 +639,56 @@ jobs:
             
             # Detect required environment variables for this function
             REQUIRED_ENV_VARS=$(get_function_env_vars "$MAIN_FILE" "$fn_dir")
-            FUNCTION_ENV_VARS=$(build_function_env_vars "$REQUIRED_ENV_VARS" "${{ needs.setup.outputs.db_env_vars }}")
+            
+            # Automatically get DB credentials (from setup job or fallback to secrets)
+            DB_ENV_VARS_FROM_SECRETS="${{ needs.setup.outputs.db_env_vars }}"
+            
+            if [[ -z "$DB_ENV_VARS_FROM_SECRETS" ]]; then
+              echo "📋 DB credentials not in setup output, retrieving directly from secrets..."
+              
+              # Auto-determine which DB secret to use
+              REPO="${{ needs.setup.outputs.repo }}"
+              BRANCH="${{ needs.setup.outputs.branch }}"
+              
+              if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
+                DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_PROD }}"
+              elif [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" != "main" ]]; then
+                DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV }}"
+              elif [[ "$REPO" == "jktech-training/skill-matrix-V2" ]] && [[ "$BRANCH" != "main" ]]; then
+                DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV_V2 }}"
+              else
+                DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV_V2 }}"
+              fi
+              
+              # Process the secret
+              DB_ENV_VARS_FROM_SECRETS=$(echo "$DB_ENV_VARS_FROM_SECRETS" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '\n' ',' | sed 's/,$//')
+              
+              if [[ -z "$DB_ENV_VARS_FROM_SECRETS" ]]; then
+                echo "❌ ERROR: Failed to retrieve DB credentials from secrets!"
+                exit 1
+              fi
+              echo "✅ Retrieved DB credentials directly from secrets"
+            else
+              echo "📋 Using DB credentials from setup job"
+            fi
+            
+            # Build function environment variables (includes DB credentials from secrets)
+            FUNCTION_ENV_VARS=$(build_function_env_vars "$REQUIRED_ENV_VARS" "$DB_ENV_VARS_FROM_SECRETS")
+            
+            # Verify DB credentials are included
+            if [[ "$FUNCTION_ENV_VARS" == *"DB_HOST="* ]] && \
+               [[ "$FUNCTION_ENV_VARS" == *"DB_USER="* ]] && \
+               [[ "$FUNCTION_ENV_VARS" == *"DB_PASS="* ]] && \
+               [[ "$FUNCTION_ENV_VARS" == *"DB_NAME="* ]]; then
+              echo "✅ Verified: DB credentials from secrets are included"
+              # Debug: Show env vars (mask sensitive values)
+              FUNCTION_ENV_VARS_DEBUG=$(echo "$FUNCTION_ENV_VARS" | sed 's/\(DB_PASS=[^,]*\)/DB_PASS=***/g' | sed 's/\(DB_USER=[^,]*\)/DB_USER=***/g')
+              echo "   Final env vars preview: $(echo "$FUNCTION_ENV_VARS_DEBUG" | cut -c1-300)..."
+            else
+              echo "❌ ERROR: DB credentials missing from function env vars!"
+              echo "   FUNCTION_ENV_VARS content: $(echo "$FUNCTION_ENV_VARS" | cut -c1-200)"
+              exit 1
+            fi
             
             # Add BUCKET_NAME if function requires it (for bucket trigger functions or uploadCv)
             BUCKET_NAME="${{ needs.setup.outputs.bucket_name }}"
@@ -618,6 +742,13 @@ jobs:
                 --quiet
               
               if [[ $? -eq 0 ]]; then
+                # Ensure public access with IAM policy binding
+                gcloud functions add-iam-policy-binding "$FUNCTION_NAME" \
+                  --region=asia-south1 \
+                  --member="allUsers" \
+                  --role="roles/cloudfunctions.invoker" \
+                  --quiet || echo "⚠️  IAM policy binding may already exist"
+                
                 echo "✅ Successfully deployed: $FUNCTION_NAME (HTTP trigger)"
                 ((DEPLOYED_COUNT++)) || true
               else
