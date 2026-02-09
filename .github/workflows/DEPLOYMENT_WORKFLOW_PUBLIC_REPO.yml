@@ -453,26 +453,55 @@ jobs:
               return
             fi
             
+            echo "🔍 Building function env vars..."
+            echo "   Input db_env_vars length: ${#db_env_vars}"
+            echo "   Input preview: $(echo "$db_env_vars" | cut -c1-100)..."
+            
             # Parse DB env vars into a temp file
             local temp_file=$(mktemp)
+            # Normalize: remove newlines, normalize spaces, convert to comma-separated
             db_env_vars=$(echo "$db_env_vars" | tr '\n' ' ' | sed 's/  */ /g' | tr ' ' ',')
+            # Split on comma followed by uppercase letter or underscore (start of new KEY=)
             echo "$db_env_vars" | sed 's/,\([A-Z_][A-Z_]*=\)/\n\1/g' | grep '=' > "$temp_file" || {
+              # Fallback: simple comma split
               echo "$db_env_vars" | tr ',' '\n' | grep '=' > "$temp_file"
             }
             
+            # Debug: Show what was parsed
+            echo "   Parsed variables:"
+            while IFS= read -r line; do
+              var_name=$(echo "$line" | cut -d'=' -f1)
+              if [[ "$var_name" == "DB_PASS" ]] || [[ "$var_name" == "DB_USER" ]]; then
+                echo "     $var_name=***"
+              else
+                echo "     $line"
+              fi
+            done < "$temp_file" | head -10
+            
             # ALWAYS include base DB variables first
             local base_db_vars=("DB_HOST" "DB_USER" "DB_PASS" "DB_NAME" "DB_PORT" "DB_SCHEMA")
+            local added_count=0
             for var in "${base_db_vars[@]}"; do
               var_line=$(grep "^${var}=" "$temp_file" | head -n1)
               if [[ -n "$var_line" ]]; then
                 var_pair=$(echo "$var_line" | cut -d'=' -f1-)
                 if [[ -n "$var_pair" ]]; then
                   function_env_vars="${function_env_vars},${var_pair}"
+                  echo "   ✅ Added base DB variable: $var"
+                  ((added_count++)) || true
+                else
+                  echo "   ⚠️  Warning: Could not extract value for $var from '$var_line'"
                 fi
               else
-                echo "⚠️  Warning: Base DB variable $var not found"
+                echo "   ⚠️  Warning: Base DB variable $var not found in temp file"
               fi
             done
+            
+            if [[ $added_count -eq 0 ]]; then
+              echo "   ❌ ERROR: No base DB variables were added!"
+              echo "   Temp file contents:"
+              cat "$temp_file" | head -10
+            fi
             
             # Then add other detected variables - automatically fetch from secrets
             IFS=',' read -ra REQUIRED <<< "$required_vars"
@@ -643,7 +672,11 @@ jobs:
             # Automatically get DB credentials (from setup job or fallback to secrets)
             DB_ENV_VARS_FROM_SECRETS="${{ needs.setup.outputs.db_env_vars }}"
             
-            if [[ -z "$DB_ENV_VARS_FROM_SECRETS" ]]; then
+            # Debug: Check what we got from setup job
+            if [[ -n "$DB_ENV_VARS_FROM_SECRETS" ]]; then
+              echo "📋 Received DB credentials from setup job (length: ${#DB_ENV_VARS_FROM_SECRETS} chars)"
+              echo "   Preview: $(echo "$DB_ENV_VARS_FROM_SECRETS" | cut -c1-150)..."
+            else
               echo "📋 DB credentials not in setup output, retrieving directly from secrets..."
               
               # Auto-determine which DB secret to use
@@ -652,12 +685,16 @@ jobs:
               
               if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
                 DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_PROD }}"
+                echo "   Using DB_PROD secret"
               elif [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" != "main" ]]; then
                 DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV }}"
+                echo "   Using DB_DEV secret"
               elif [[ "$REPO" == "jktech-training/skill-matrix-V2" ]] && [[ "$BRANCH" != "main" ]]; then
                 DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV_V2 }}"
+                echo "   Using DB_DEV_V2 secret"
               else
                 DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV_V2 }}"
+                echo "   Using DB_DEV_V2 secret (default)"
               fi
               
               # Process the secret
@@ -667,9 +704,7 @@ jobs:
                 echo "❌ ERROR: Failed to retrieve DB credentials from secrets!"
                 exit 1
               fi
-              echo "✅ Retrieved DB credentials directly from secrets"
-            else
-              echo "📋 Using DB credentials from setup job"
+              echo "✅ Retrieved DB credentials directly from secrets (length: ${#DB_ENV_VARS_FROM_SECRETS} chars)"
             fi
             
             # Build function environment variables (includes DB credentials from secrets)
@@ -701,6 +736,11 @@ jobs:
             echo "   Environment: ${{ needs.setup.outputs.env }}"
             echo "   Directory: $fn_dir"
             echo "   Required env vars: $REQUIRED_ENV_VARS"
+            echo "   FUNCTION_ENV_VARS to deploy:"
+            FUNCTION_ENV_VARS_DEBUG=$(echo "$FUNCTION_ENV_VARS" | sed 's/\(DB_PASS=[^,]*\)/DB_PASS=***/g' | sed 's/\(DB_USER=[^,]*\)/DB_USER=***/g')
+            echo "$FUNCTION_ENV_VARS_DEBUG" | tr ',' '\n' | while IFS= read -r line; do
+              echo "     $line"
+            done
             
             # Check if it's a bucket trigger function
             if is_bucket_trigger "$MAIN_FILE" "$fn_dir"; then
