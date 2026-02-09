@@ -1,0 +1,280 @@
+# This workflow should be placed in the PUBLIC repository: JKTech-Sushant/Skill-Matrix-Public
+# File: .github/workflows/deploy.yml
+
+name: Deploy Frontend and Backend
+
+on:
+  repository_dispatch:
+    types: [trigger-from-private]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}
+          ref: ${{ github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.PRIVATETOKENPULL }}
+
+      - name: Determine Environment
+        id: env
+        run: |
+          BRANCH=${{ github.event.client_payload.ref || 'main' }}
+          REPO=${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}
+          echo "REPO=$REPO" >> $GITHUB_ENV
+          if [[ "$BRANCH" == "main" ]]; then
+            ENV="production"
+            ENV_PREFIX=""
+            CLOUD_RUN_SERVICE="skill-matrix"
+            IMAGE_SUFFIX=""
+            BUCKET_NAME="skill_matrix"
+          else
+            ENV="development"
+            ENV_PREFIX="dev_"
+            CLOUD_RUN_SERVICE="skill-matrix-dev"
+            IMAGE_SUFFIX="-dev"
+            BUCKET_NAME="dev_skill_matrix"
+          fi
+          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
+          echo "ENV=$ENV" >> $GITHUB_ENV
+          echo "ENV_PREFIX=$ENV_PREFIX" >> $GITHUB_ENV
+          echo "CLOUD_RUN_SERVICE=$CLOUD_RUN_SERVICE" >> $GITHUB_ENV
+          echo "IMAGE_SUFFIX=$IMAGE_SUFFIX" >> $GITHUB_ENV
+          echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
+          echo "Environment: $ENV"
+          echo "Branch: $BRANCH"
+          echo "Repository: $REPO"
+          echo "Cloud Run Service: $CLOUD_RUN_SERVICE"
+
+      - name: Set Database Credentials
+        run: |
+          REPO=${{ env.REPO }}
+          BRANCH=${{ env.BRANCH }}
+          
+          # Determine which DB credentials secret to use based on repo and branch
+          if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
+            # skill-matrix main branch - use DB_PROD
+            DB_ENV_VARS="${{ secrets.DB_PROD }}"
+            echo "Using DB credentials for: skill-matrix (main/production)"
+          elif [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" != "main" ]]; then
+            # skill-matrix development branch - use DB_DEV
+            DB_ENV_VARS="${{ secrets.DB_DEV }}"
+            echo "Using DB credentials for: skill-matrix (development)"
+          elif [[ "$REPO" == "jktech-training/skill-matrix-V2" ]] && [[ "$BRANCH" != "main" ]]; then
+            # skill-matrix-V2 development branch - use DB_DEV_V2
+            DB_ENV_VARS="${{ secrets.DB_DEV_V2 }}"
+            echo "Using DB credentials for: skill-matrix-V2 (development)"
+          else
+            # Fallback to DB_DEV_V2 for skill-matrix-V2 main if needed
+            DB_ENV_VARS="${{ secrets.DB_DEV_V2 }}"
+            echo "Using default DB credentials (DB_DEV_V2)"
+          fi
+          
+          # Convert newlines to commas for gcloud --set-env-vars format
+          # Remove empty lines and trim whitespace, then join with commas
+          DB_ENV_VARS=$(echo "$DB_ENV_VARS" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '\n' ',' | sed 's/,$//')
+          
+          # Add environment-specific variables if they exist in separate secrets
+          # These should be added to DB secrets (DB_PROD, DB_DEV, DB_DEV_V2) for each environment
+          # Or can be provided as separate secrets as fallback
+          BASE_URL_SECRET="${{ secrets.BASE_URL }}"
+          SEND_EMAIL_URL_SECRET="${{ secrets.SEND_EMAIL_URL }}"
+          APP_URL_SECRET="${{ secrets.APP_URL }}"
+          EMAIL_TEMPLATE_SECRET="${{ secrets.EMAIL_TEMPLATE }}"
+          
+          if [[ "$DB_ENV_VARS" != *"BASE_URL="* ]] && [[ -n "$BASE_URL_SECRET" ]]; then
+            DB_ENV_VARS="$DB_ENV_VARS,BASE_URL=$BASE_URL_SECRET"
+          fi
+          
+          if [[ "$DB_ENV_VARS" != *"SEND_EMAIL_URL="* ]] && [[ -n "$SEND_EMAIL_URL_SECRET" ]]; then
+            DB_ENV_VARS="$DB_ENV_VARS,SEND_EMAIL_URL=$SEND_EMAIL_URL_SECRET"
+          fi
+          
+          if [[ "$DB_ENV_VARS" != *"APP_URL="* ]] && [[ -n "$APP_URL_SECRET" ]]; then
+            DB_ENV_VARS="$DB_ENV_VARS,APP_URL=$APP_URL_SECRET"
+          fi
+          
+          if [[ "$DB_ENV_VARS" != *"EMAIL_TEMPLATE="* ]] && [[ -n "$EMAIL_TEMPLATE_SECRET" ]]; then
+            DB_ENV_VARS="$DB_ENV_VARS,EMAIL_TEMPLATE=$EMAIL_TEMPLATE_SECRET"
+          fi
+          
+          # Store as environment variable for use in deployment steps
+          echo "DB_ENV_VARS=$DB_ENV_VARS" >> $GITHUB_ENV
+          
+          echo "✅ Environment variables loaded successfully"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.GCP_SAKEY }}'
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: training-project-419308
+
+      - name: Check for Changes in Frontend
+        id: check_frontend
+        run: |
+          set -euo pipefail
+          git fetch --unshallow || true
+          BASE_SHA=$(git merge-base origin/${{ env.BRANCH }} HEAD)
+          CHANGED=$(git diff --name-only $BASE_SHA HEAD | grep '^frontend/' || true)
+
+          if [[ -z "$CHANGED" ]]; then
+            echo "Frontend not changed."
+            echo "CHANGED_FRONTEND=false" >> $GITHUB_ENV
+          else
+            echo "Frontend has changes."
+            echo "CHANGED_FRONTEND=true" >> $GITHUB_ENV
+          fi
+
+      - name: Check for Changes in Backend
+        id: check_backend
+        run: |
+          set -euo pipefail
+          git fetch --unshallow || true
+          BASE_SHA=$(git merge-base origin/${{ env.BRANCH }} HEAD)
+          CHANGED=$(git diff --name-only $BASE_SHA HEAD | grep '^backend/' || true)
+
+          if [[ -z "$CHANGED" ]]; then
+            echo "Backend not changed."
+            echo "CHANGED_BACKEND=false" >> $GITHUB_ENV
+          else
+            echo "Backend has changes."
+            echo "CHANGED_BACKEND=true" >> $GITHUB_ENV
+          fi
+
+      - name: Set Docker Image Name and Tag
+        if: env.CHANGED_FRONTEND == 'true'
+        run: |
+          IMAGE_NAME="frontend-ui${IMAGE_SUFFIX}"
+          TAG=$(date +%Y%m%d-%H%M%S)
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "Full image: asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG}"
+
+      - name: Build and Push Docker Image
+        if: env.CHANGED_FRONTEND == 'true'
+        run: |
+          docker build -t asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG} ./frontend
+          gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+          docker push asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG}
+      
+      - name: Deploy Frontend to Cloud Run
+        if: env.CHANGED_FRONTEND == 'true'
+        run: |
+          gcloud run deploy ${CLOUD_RUN_SERVICE} \
+            --image=asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG} \
+            --platform=managed \
+            --region=asia-south1 \
+            --allow-unauthenticated \
+            --quiet
+
+          gcloud run services add-iam-policy-binding ${CLOUD_RUN_SERVICE} \
+            --member="allUsers" \
+            --role="roles/run.invoker" \
+            --region=asia-south1 \
+            --platform=managed \
+            --quiet
+
+      - name: Deploy Changed Backend Functions
+        if: env.CHANGED_BACKEND == 'true'
+        run: |
+          set -euo pipefail
+          echo "Detecting and deploying changed Cloud Functions in backend/..."
+          echo "Environment: ${{ env.ENV }}"
+          echo "Function prefix: ${{ env.ENV_PREFIX }}"
+      
+          git fetch --unshallow || true
+          BASE_SHA=$(git merge-base origin/${{ env.BRANCH }} HEAD)
+      
+          # Function to extract entry point from main.py
+          extract_entry_point() {
+            local main_file="$1"
+            # Look for function definitions that are likely entry points
+            # Pattern: def function_name(request): or def function_name_v2(request):
+            grep -Po '^def\s+\K\w+(?=\s*\(request\):)' "$main_file" | head -n1 || echo ""
+          }
+      
+          DEPLOYED_COUNT=0
+          SKIPPED_COUNT=0
+      
+          # Find all directories containing main.py (handles nested structure: backend/category/function_name/)
+          find backend -type f -name "main.py" | while read -r MAIN_FILE; do
+            fn_dir=$(dirname "$MAIN_FILE")
+            fn_folder=$(basename "$fn_dir")
+      
+            # Check if this function directory was changed
+            CHANGED_FILES=$(git diff --name-only $BASE_SHA HEAD -- "$fn_dir" || echo "")
+            if [[ -z "$CHANGED_FILES" ]]; then
+              echo "⏭️  Skipping $fn_folder (no changes detected)"
+              continue
+            fi
+      
+            echo "📝 Changes detected in $fn_folder"
+      
+            # Extract entry point from main.py
+            ENTRY_POINT=$(extract_entry_point "$MAIN_FILE")
+      
+            if [[ -z "$ENTRY_POINT" ]]; then
+              echo "⚠️  No entry point found in $MAIN_FILE. Skipping..."
+              ((SKIPPED_COUNT++)) || true
+              continue
+            fi
+      
+            # Determine function name with environment prefix
+            # For v2 functions, the entry point already has _v2 suffix, so we use it as-is
+            # For legacy functions, we add the prefix
+            if [[ "$ENTRY_POINT" == *_v2 ]]; then
+              # V2 function - use entry point name directly (no prefix needed for v2)
+              FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}"
+            else
+              # Legacy function - add prefix
+              FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}"
+            fi
+              
+            echo "🚀 Deploying $FUNCTION_NAME from $fn_folder with entry point: $ENTRY_POINT"
+            echo "   Environment: ${{ env.ENV }}"
+      
+            # Check if it's a bucket trigger function (if any exist in backend/)
+            if [[ "$fn_folder" == *"CSVtoDB"* ]] || [[ "$fn_folder" == *"load"* ]] || [[ "$fn_folder" == *"split"* ]]; then
+              gcloud functions deploy "$FUNCTION_NAME" \
+                --runtime python310 \
+                --trigger-bucket ${BUCKET_NAME} \
+                --entry-point "$ENTRY_POINT" \
+                --source "$fn_dir" \
+                --service-account training-project-419308@appspot.gserviceaccount.com \
+                --region asia-south1 \
+                --no-gen2 \
+                --memory 512MB \
+                --timeout 540s \
+                --set-env-vars ENV=${{ env.ENV }},${{ env.DB_ENV_VARS }} \
+                --quiet
+            else
+              # HTTP trigger for other functions
+              gcloud functions deploy "$FUNCTION_NAME" \
+                --runtime python310 \
+                --trigger-http \
+                --entry-point "$ENTRY_POINT" \
+                --source "$fn_dir" \
+                --service-account training-project-419308@appspot.gserviceaccount.com \
+                --allow-unauthenticated \
+                --no-gen2 \
+                --region asia-south1 \
+                --set-env-vars ENV=${{ env.ENV }},${{ env.DB_ENV_VARS }} \
+                --quiet
+            fi
+      
+            echo "✅ Successfully deployed: $FUNCTION_NAME"
+            ((DEPLOYED_COUNT++)) || true
+          done
+      
+          echo ""
+          echo "📊 Backend Deployment Summary:"
+          echo "   Environment: ${{ env.ENV }}"
+          echo "   Deployed: $DEPLOYED_COUNT functions"
+          echo "   Skipped: $SKIPPED_COUNT functions"
