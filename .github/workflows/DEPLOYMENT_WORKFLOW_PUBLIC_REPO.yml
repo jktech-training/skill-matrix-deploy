@@ -51,6 +51,10 @@ jobs:
             IMAGE_SUFFIX="-dev"
             BUCKET_NAME="dev_skill_matrix"
           fi
+          
+          # Convert Cloud Run service name to lowercase (Cloud Run requires lowercase names)
+          CLOUD_RUN_SERVICE=$(echo "$CLOUD_RUN_SERVICE" | tr '[:upper:]' '[:lower:]')
+          
           echo "BRANCH=$BRANCH" >> $GITHUB_ENV
           echo "ENV=$ENV" >> $GITHUB_ENV
           echo "ENV_PREFIX=$ENV_PREFIX" >> $GITHUB_ENV
@@ -262,30 +266,6 @@ jobs:
           echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
           echo "TAG=$TAG" >> $GITHUB_ENV
           echo "Full image: asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG}"
-
-      - name: Build and Push Docker Image
-        if: env.CHANGED_FRONTEND == 'true'
-        run: |
-          docker build -t asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG} ./frontend
-          gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
-          docker push asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG}
-      
-      - name: Deploy Frontend to Cloud Run
-        if: env.CHANGED_FRONTEND == 'true'
-        run: |
-          gcloud run deploy ${CLOUD_RUN_SERVICE} \
-            --image=asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG} \
-            --platform=managed \
-            --region=asia-south1 \
-            --allow-unauthenticated \
-            --quiet
-
-          gcloud run services add-iam-policy-binding ${CLOUD_RUN_SERVICE} \
-            --member="allUsers" \
-            --role="roles/run.invoker" \
-            --region=asia-south1 \
-            --platform=managed \
-            --quiet
 
       - name: Deploy Changed Backend Functions
         if: env.CHANGED_BACKEND == 'true'
@@ -568,3 +548,31 @@ jobs:
             echo "⚠️  Warning: No functions were deployed"
             exit 1
           fi
+
+      - name: Build and Push Docker Image
+        if: env.CHANGED_FRONTEND == 'true'
+        run: |
+          docker build \
+            --build-arg VITE_BASE_URL="${{ secrets.VITE_BASE_URL }}" \
+            --build-arg VITE_SSO_URL="${{ secrets.VITE_SSO_URL }}" \
+            -t asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG} \
+            ./frontend
+          gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+          docker push asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG}
+      
+      - name: Deploy Frontend to Cloud Run
+        if: env.CHANGED_FRONTEND == 'true'
+        run: |
+          gcloud run deploy ${CLOUD_RUN_SERVICE} \
+            --image=asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG} \
+            --platform=managed \
+            --region=asia-south1 \
+            --allow-unauthenticated \
+            --quiet
+
+          gcloud run services add-iam-policy-binding ${CLOUD_RUN_SERVICE} \
+            --member="allUsers" \
+            --role="roles/run.invoker" \
+            --region=asia-south1 \
+            --platform=managed \
+            --quiet
