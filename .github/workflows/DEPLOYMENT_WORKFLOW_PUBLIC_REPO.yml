@@ -260,6 +260,15 @@ jobs:
         with:
           project_id: training-project-419308
 
+      - name: Enable Required APIs
+        run: |
+          echo "🔧 Enabling required Google Cloud APIs..."
+          gcloud services enable cloudfunctions.googleapis.com --quiet || true
+          gcloud services enable cloudbuild.googleapis.com --quiet || true
+          gcloud services enable iam.googleapis.com --quiet || true
+          gcloud services enable run.googleapis.com --quiet || true
+          echo "✅ APIs enabled"
+
       - name: Check for Changes in Backend
         id: check_backend
         run: |
@@ -498,6 +507,9 @@ jobs:
                     # BUCKET_NAME is handled separately, skip here
                     continue
                     ;;
+                  OPENAI_API_KEY)
+                    secret_value="${{ secrets.OPENAI_API_KEY }}"
+                    ;;
                   *)
                     echo "   ⚠️  Variable $var detected but not found in secrets (add to workflow if needed)"
                     continue
@@ -677,6 +689,18 @@ jobs:
               echo "BUCKET_NAME: \"${BUCKET_NAME}\"" >> "$ENV_VARS_FILE"
             fi
             
+            # Verify OPENAI_API_KEY is included if required
+            if grep -q "OPENAI_API_KEY" <<< "$REQUIRED_ENV_VARS"; then
+              if ! grep -q "^OPENAI_API_KEY:" "$ENV_VARS_FILE"; then
+                echo "❌ ERROR: OPENAI_API_KEY is required but not found in secrets!"
+                echo "   Please ensure OPENAI_API_KEY is included in your DB secret or add it as a separate secret."
+                rm -f "$ENV_VARS_FILE"
+                exit 1
+              else
+                echo "✅ Verified: OPENAI_API_KEY is included"
+              fi
+            fi
+            
             echo "🚀 Deploying $FUNCTION_NAME from $fn_folder"
             echo "   Entry point: $ENTRY_POINT"
             echo "   Environment: ${{ needs.setup.outputs.env }}"
@@ -694,8 +718,8 @@ jobs:
                 --source "$fn_dir" \
                 --service-account training-project-419308@appspot.gserviceaccount.com \
                 --region asia-south1 \
-                --no-gen2 \
-                --memory 512MB \
+                --gen2 \
+                --memory 512Mi \
                 --timeout 540s \
                 --env-vars-file "$ENV_VARS_FILE" \
                 --quiet
@@ -720,7 +744,7 @@ jobs:
                 --source "$fn_dir" \
                 --service-account training-project-419308@appspot.gserviceaccount.com \
                 --allow-unauthenticated \
-                --no-gen2 \
+                --gen2 \
                 --region asia-south1 \
                 --env-vars-file "$ENV_VARS_FILE" \
                 --quiet
@@ -730,11 +754,34 @@ jobs:
               
               if [[ $? -eq 0 ]]; then
                 # Ensure public access with IAM policy binding
-                gcloud functions add-iam-policy-binding "$FUNCTION_NAME" \
+                # Gen2 functions use Cloud Run IAM, so we use run services command
+                echo "🔐 Setting IAM policy for public access (Gen2 uses Cloud Run IAM)..."
+                if gcloud run services add-iam-policy-binding "$FUNCTION_NAME" \
                   --region=asia-south1 \
                   --member="allUsers" \
-                  --role="roles/cloudfunctions.invoker" \
-                  --quiet || echo "⚠️  IAM policy binding may already exist"
+                  --role="roles/run.invoker" \
+                  --platform=managed \
+                  --quiet 2>&1; then
+                  echo "✅ IAM policy binding successful"
+                else
+                  # Check if policy already exists
+                  echo "⚠️  IAM policy binding command failed, checking if policy already exists..."
+                  if gcloud run services get-iam-policy "$FUNCTION_NAME" \
+                    --region=asia-south1 \
+                    --platform=managed \
+                    --format="value(bindings[].members)" 2>/dev/null | grep -q "allUsers"; then
+                    echo "✅ Public access already configured"
+                  else
+                    echo "❌ IAM policy binding failed - attempting alternative method..."
+                    # Try without --quiet to see the error
+                    gcloud run services add-iam-policy-binding "$FUNCTION_NAME" \
+                      --region=asia-south1 \
+                      --member="allUsers" \
+                      --role="roles/run.invoker" \
+                      --platform=managed || \
+                      echo "⚠️  Manual IAM policy binding may be required for $FUNCTION_NAME"
+                  fi
+                fi
                 
                 echo "✅ Successfully deployed: $FUNCTION_NAME (HTTP trigger)"
                 ((DEPLOYED_COUNT++)) || true
