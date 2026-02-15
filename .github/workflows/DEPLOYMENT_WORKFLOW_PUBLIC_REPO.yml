@@ -221,7 +221,20 @@ jobs:
           elif git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
             # No deployment tag found, compare with origin/branch
             echo "📌 No deployment tag found, comparing with origin/$BRANCH"
-            CHANGED=$(git diff --name-only "origin/$BRANCH" HEAD | grep '^backend/' || true)
+            ORIGIN_SHA=$(git rev-parse "origin/$BRANCH")
+            HEAD_SHA=$(git rev-parse HEAD)
+            
+            if [[ "$ORIGIN_SHA" == "$HEAD_SHA" ]]; then
+              # Same commit - check if backend files exist (first deployment or redeployment)
+              echo "📌 Same commit as origin/$BRANCH, checking if backend files exist"
+              if git ls-tree -r --name-only HEAD | grep -q '^backend/'; then
+                CHANGED="backend/"
+                echo "✅ Backend files found - will deploy"
+              fi
+            else
+              # Different commits - check for changes
+              CHANGED=$(git diff --name-only "origin/$BRANCH" HEAD | grep '^backend/' || true)
+            fi
           else
             # Branch doesn't exist on origin - deploy if backend files exist
             echo "📌 New branch, checking if backend files exist"
