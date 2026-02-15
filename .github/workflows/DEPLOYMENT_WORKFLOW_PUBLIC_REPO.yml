@@ -191,26 +191,28 @@ jobs:
         with:
           project_id: training-project-419308
 
-      - name: Enable Required APIs
+      - name: Verify Required APIs
         run: |
-          # Enable Service Usage API first (required to enable other APIs)
-          echo "🔧 Enabling Service Usage API..."
-          if ! gcloud services enable serviceusage.googleapis.com --quiet 2>&1; then
-            echo "⚠️  Service Usage API enable failed - APIs may already be enabled or need manual activation"
-            echo "   If this is the first time, enable it manually: https://console.cloud.google.com/apis/library/serviceusage.googleapis.com"
-          else
-            echo "✅ Service Usage API enabled"
-            # Wait a moment for Service Usage API to propagate
-            sleep 3
-          fi
+          # Check if required APIs are enabled (don't try to enable - requires Service Usage API which needs manual activation)
+          echo "🔍 Verifying required APIs are enabled..."
+          REQUIRED_APIS=("run.googleapis.com" "cloudbuild.googleapis.com" "cloudfunctions.googleapis.com" "iam.googleapis.com" "eventarc.googleapis.com")
+          ALL_ENABLED=true
           
-          # Enable APIs in correct dependency order for Gen2 Cloud Functions
-          echo "🔧 Enabling required APIs..."
-          for api in run cloudbuild cloudfunctions iam; do
-            echo "   Enabling ${api}.googleapis.com..."
-            gcloud services enable ${api}.googleapis.com --quiet 2>&1 || echo "   ⚠️  ${api} API enable failed (may already be enabled)"
+          for api in "${REQUIRED_APIS[@]}"; do
+            if gcloud services list --enabled --filter="name:$api" --format="value(name)" 2>/dev/null | grep -q "$api"; then
+              echo "   ✅ $api is enabled"
+            else
+              echo "   ⚠️  $api is not enabled"
+              ALL_ENABLED=false
+            fi
           done
-          echo "✅ API enablement attempt complete"
+          
+          if [[ "$ALL_ENABLED" == "false" ]]; then
+            echo "⚠️  Some APIs may not be enabled. If deployment fails, enable them manually:"
+            echo "   https://console.cloud.google.com/apis/library?project=training-project-419308"
+          else
+            echo "✅ All required APIs are enabled"
+          fi
 
       - name: Check for Changes in Backend
         id: check_backend
@@ -290,8 +292,37 @@ jobs:
           # Helper functions
           extract_entry_point() {
             local main_file="$1"
-            grep -Po '^def\s+\K\w+(?=\s*\([^)]*request[^)]*\):)' "$main_file" 2>/dev/null | head -n1 || \
-            grep -E '^def\s+\w+\s*\(' "$main_file" 2>/dev/null | head -n1 | grep -oP 'def\s+\K\w+'
+            local fn_folder="$2"
+            
+            # Convert folder name to expected function name pattern
+            # Try to find function that matches folder name first
+            if [[ -n "$fn_folder" ]]; then
+              # Remove _v2 suffix from folder for matching
+              folder_base="${fn_folder%_v2}"
+              # Try to find function matching folder name (case-insensitive, with variations)
+              matched=$(grep -iPo '^def\s+\K\w+(?=\s*\([^)]*request[^)]*\):)' "$main_file" 2>/dev/null | \
+                grep -iE "(^${folder_base}$|^${fn_folder}$|${folder_base//Employee/employee}|${folder_base//[A-Z]/_&})" | head -n1)
+              
+              if [[ -n "$matched" ]]; then
+                echo "$matched"
+                return 0
+              fi
+            fi
+            
+            # Skip helper functions (cors_response, cors_handler, etc.)
+            # Try to find main handler function (one with request parameter, excluding helpers)
+            main_handler=$(grep -Po '^def\s+\K\w+(?=\s*\([^)]*request[^)]*\):)' "$main_file" 2>/dev/null | \
+              grep -vE '^(cors_|helper_|util_|_cors)' | head -n1)
+            
+            if [[ -n "$main_handler" ]]; then
+              echo "$main_handler"
+              return 0
+            fi
+            
+            # Fallback: get first function (excluding helpers)
+            grep -E '^def\s+\w+\s*\(' "$main_file" 2>/dev/null | \
+              grep -vE '^(def\s+(cors_|helper_|util_|_cors))' | \
+              head -n1 | grep -oP 'def\s+\K\w+'
           }
           
           get_function_env_vars() {
@@ -467,8 +498,8 @@ jobs:
               continue
             }
             
-            # Extract entry point
-            ENTRY_POINT=$(extract_entry_point "$MAIN_FILE")
+            # Extract entry point (pass folder name to help match correct function)
+            ENTRY_POINT=$(extract_entry_point "$MAIN_FILE" "$fn_folder")
             [[ -z "$ENTRY_POINT" ]] && {
               echo "⚠️  No entry point in $MAIN_FILE. Skipping..."
               ((SKIPPED_COUNT++)) || true
