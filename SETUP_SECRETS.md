@@ -122,7 +122,9 @@ BASE_URL=https://asia-south1-training-project-419308.cloudfunctions.net/
 SEND_EMAIL_URL=https://asia-south1-training-project-419308.cloudfunctions.net/send_mail
 APP_URL=https://skill-matrix-140475459295.asia-south1.run.app/
 EMAIL_TEMPLATE=<!doctypehtml><html lang=en><meta charset=UTF-8><meta content='width=device-width,initial-scale=1'name=viewport><style>body{font-family:Arial,sans-serif;background-color:#f6f8fa;margin:0;padding:0;color:#333}.container{max-width:600px;margin:40px auto;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1)}.header{background:linear-gradient(to right,#1e40af,#2563eb,#3b82f6);color:#fff;padding:16px 24px;font-size:20px;font-weight:700;text-align:center}.content{padding:24px;line-height:1.6;background-color:#fff;color:#333}.content ul{padding-left:20px;margin-top:8px}.content li{margin-bottom:6px}.button{display:inline-block;margin-top:16px;padding:8px 16px;font-size:14px;color:#fff;background-color:#2563eb;text-decoration:none;border-radius:6px;text-align:center}.footer{padding:16px 24px;background-color:#f1f3f4;font-size:14px;color:#555;text-align:center}.footer strong{color:#202124}@media (prefers-color-scheme:dark){body{background-color:#1a1a1a!important;color:#e0e0e0!important}.container{box-shadow:0 2px 8px rgba(255,255,255,.05)}.header{background:linear-gradient(to right,#4b5563,#1f2937,#111827);color:#e0e0e0!important}.content{background-color:#2a2a2a;color:#e0e0e0}.button{background-color:#4f46e5;color:#fff!important}.footer{background-color:#333!important;color:#aaa!important}.footer strong{color:#fff!important}}</style><div class=container><div class=header>Skill Review Request</div><div class=content><p>Dear Manager,<p>The following skill(s) have been requested for review by <strong>{{requestee_name}}</strong>:<ul>{{requested_skills}}</ul><p>Please review and take the necessary action.<p><a class=button href={{skill_matrix_url}}>Go to Skill Matrix</a><p>Regards,<br><strong>Skill Matrix Review System</strong></div><div class=footer>This is an automated email. Please do not reply.</div></div>
-OPENAI_API_KEY=sk-proj-your-openai-api-key-here
+OPENAI_API_KEY=sk-proj-mH0eUfQljz4q0JtH283gr-OzYtYyKfTsHUhacl4Duj4SmbP
+FVXXNGDjHKpC2DHrtuLPCU0Ir6iT3BlbkFJKNeis982bVJ63jssfIjoAnTtVXEtXyT_-wj
+q2EmL31ZkQktip2Df2D_XdVGl0NZ8-yHyY-okoA
   ```
 
 **How to add these secrets:**
@@ -136,13 +138,13 @@ OPENAI_API_KEY=sk-proj-your-openai-api-key-here
 - ✅ **No JSON needed** - Just use key=value format, one per line
 - ✅ Each secret contains all database credentials and required environment variables
 - ✅ **OPENAI_API_KEY is required** - Make sure to include it in all DB secrets (DB_PROD, DB_DEV, and DB_DEV_V2)
+- ✅ **All environment variables must be in DB secrets** - The workflow only reads from DB secrets, not individual secrets
 - ✅ The workflow automatically parses these and extracts individual values
 - ✅ The workflow automatically detects required environment variables from your code (like OPENAI_API_KEY)
 - ✅ The workflow selects the correct secret based on repository and branch:
   - `jktech-training/skill-matrix` + `main` → uses `DB_PROD`
   - `jktech-training/skill-matrix` + development → uses `DB_DEV`
   - `jktech-training/skill-matrix-V2` + development → uses `DB_DEV_V2`
-- ⚠️ **If OPENAI_API_KEY is missing from your DB secret**, you can also add it as a separate GitHub secret named `OPENAI_API_KEY` as a fallback
 
 ### Accessing Secrets in Workflow:
 

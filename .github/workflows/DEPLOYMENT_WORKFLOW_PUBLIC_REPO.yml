@@ -8,9 +8,6 @@ on:
     types: [trigger-from-private]
 
 jobs:
-  # ============================================
-  # SETUP JOB - Common setup for all deployments
-  # ============================================
   setup:
     runs-on: ubuntu-latest
     outputs:
@@ -39,30 +36,17 @@ jobs:
           REPO=${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}
           DEPLOYMENT_TYPE=${{ github.event.client_payload.deployment_type || 'full' }}
           
-          # Determine what should be deployed based on deployment_type
-          if [[ "$DEPLOYMENT_TYPE" == "frontend" ]]; then
-            DEPLOY_BACKEND="false"
-            DEPLOY_FRONTEND="true"
-          elif [[ "$DEPLOYMENT_TYPE" == "backend" ]]; then
-            DEPLOY_BACKEND="true"
-            DEPLOY_FRONTEND="false"
-          else
-            # full deployment
-            DEPLOY_BACKEND="true"
-            DEPLOY_FRONTEND="true"
-          fi
+          # Determine deployment targets
+          case "$DEPLOYMENT_TYPE" in
+            frontend) DEPLOY_BACKEND="false"; DEPLOY_FRONTEND="true" ;;
+            backend) DEPLOY_BACKEND="true"; DEPLOY_FRONTEND="false" ;;
+            *) DEPLOY_BACKEND="true"; DEPLOY_FRONTEND="true" ;;
+          esac
           
-          echo "Deployment Type: $DEPLOYMENT_TYPE"
-          echo "Will deploy backend: $DEPLOY_BACKEND"
-          echo "Will deploy frontend: $DEPLOY_FRONTEND"
+          # Determine repository identifier
+          [[ "$REPO" == *"skill-matrix-V2"* ]] && REPO_ID="skill-matrix-V2" || REPO_ID="skill-matrix"
           
-          # Determine repository identifier for service naming
-          if [[ "$REPO" == *"skill-matrix-V2"* ]]; then
-            REPO_ID="skill-matrix-V2"
-          else
-            REPO_ID="skill-matrix"
-          fi
-          
+          # Set environment variables
           if [[ "$BRANCH" == "main" ]]; then
             ENV="production"
             ENV_PREFIX=""
@@ -77,7 +61,6 @@ jobs:
             BUCKET_NAME="dev_skill_matrix"
           fi
           
-          # Convert Cloud Run service name to lowercase (Cloud Run requires lowercase names)
           CLOUD_RUN_SERVICE=$(echo "$CLOUD_RUN_SERVICE" | tr '[:upper:]' '[:lower:]')
           
           echo "repo=$REPO" >> $GITHUB_OUTPUT
@@ -89,10 +72,6 @@ jobs:
           echo "bucket_name=$BUCKET_NAME" >> $GITHUB_OUTPUT
           echo "deploy_frontend=$DEPLOY_FRONTEND" >> $GITHUB_OUTPUT
           echo "deploy_backend=$DEPLOY_BACKEND" >> $GITHUB_OUTPUT
-          echo "Environment: $ENV"
-          echo "Branch: $BRANCH"
-          echo "Repository: $REPO"
-          echo "Cloud Run Service: $CLOUD_RUN_SERVICE"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -104,9 +83,6 @@ jobs:
         with:
           project_id: training-project-419308
 
-  # ============================================
-  # FRONTEND DEPLOYMENT JOB - Runs in parallel with backend
-  # ============================================
   deploy-frontend:
     runs-on: ubuntu-latest
     needs: setup
@@ -134,80 +110,36 @@ jobs:
         id: check_frontend
         run: |
           set -euo pipefail
-          
           git fetch --unshallow || true
           
-          # Try to find the base commit
           BRANCH="${{ needs.setup.outputs.branch }}"
           CHANGED=""
           
           if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
-            # Branch exists on origin, compare against it
-            BASE_SHA=$(git merge-base "origin/$BRANCH" HEAD 2>/dev/null || echo "")
-            if [[ -n "$BASE_SHA" ]] && [[ "$BASE_SHA" != "$(git rev-parse HEAD)" ]]; then
-              # Compare against branch's previous commit
-              CHANGED=$(git diff --name-only "$BASE_SHA" HEAD | grep '^frontend/' || true)
-            fi
+            # Compare all changes from origin/branch to HEAD (includes all commits)
+            CHANGED=$(git diff --name-only "origin/$BRANCH" HEAD | grep '^frontend/' || true)
+          else
+            # Branch doesn't exist on origin - deploy if frontend files exist
+            git ls-tree -r --name-only HEAD | grep -q '^frontend/' && CHANGED="frontend/"
           fi
           
-          # If no changes detected and branch exists, check if files exist (for first-time deployments)
-          if [[ -z "$CHANGED" ]]; then
-            # Check if frontend files exist in current commit
-            if git ls-tree -r --name-only HEAD | grep -q '^frontend/'; then
-              # Files exist, check if this is different from main (in case branches have same commits)
-              if git rev-parse --verify "origin/main" >/dev/null 2>&1; then
-                MAIN_SHA=$(git rev-parse "origin/main")
-                CURRENT_SHA=$(git rev-parse HEAD)
-                # If current commit is different from main, or if main doesn't have these files, deploy
-                if [[ "$CURRENT_SHA" != "$MAIN_SHA" ]] || ! git ls-tree -r --name-only "$MAIN_SHA" | grep -q '^frontend/'; then
-                  CHANGED="frontend/"
-                  echo "Frontend files exist and differ from main - deploying"
-                fi
-              else
-                # No main branch, but files exist - deploy
-                CHANGED="frontend/"
-                echo "Frontend files exist - deploying"
-              fi
-            fi
-          fi
-          if [[ -z "$CHANGED" ]]; then
-            echo "Frontend not changed."
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-          else
-            echo "Frontend has changes."
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-          fi
+          [[ -n "$CHANGED" ]] && echo "has_changes=true" >> $GITHUB_OUTPUT || echo "has_changes=false" >> $GITHUB_OUTPUT
 
       - name: Set Docker Image Name and Tag
         if: steps.check_frontend.outputs.has_changes == 'true'
         run: |
-          IMAGE_SUFFIX="${{ needs.setup.outputs.image_suffix }}"
-          IMAGE_NAME="frontend-ui${IMAGE_SUFFIX}"
+          IMAGE_NAME="frontend-ui${{ needs.setup.outputs.image_suffix }}"
           TAG=$(date +%Y%m%d-%H%M%S)
           echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
           echo "TAG=$TAG" >> $GITHUB_ENV
-          echo "Full image: asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG}"
 
       - name: Build and Push Docker Image
         if: steps.check_frontend.outputs.has_changes == 'true'
         run: |
-          # Determine VITE_BASE_URL with appropriate prefix
           BASE_URL="${{ secrets.VITE_BASE_URL }}"
-          ENV_PREFIX="${{ needs.setup.outputs.env_prefix }}"
-          ENV="${{ needs.setup.outputs.env }}"
-          
-          # If development, append dev_ prefix to base URL
-          if [[ "$ENV" == "development" ]]; then
-            # Ensure base URL ends with /
-            if [[ "$BASE_URL" != */ ]]; then
-              BASE_URL="${BASE_URL}/"
-            fi
-            # Append dev_ prefix
-            BASE_URL="${BASE_URL}${ENV_PREFIX}"
-            echo "Development mode: Using BASE_URL with prefix: $BASE_URL"
-          else
-            echo "Production mode: Using BASE_URL as-is: $BASE_URL"
-          fi
+          [[ "${{ needs.setup.outputs.env }}" == "development" ]] && \
+            [[ "$BASE_URL" != */ ]] && BASE_URL="${BASE_URL}/" && \
+            BASE_URL="${BASE_URL}${{ needs.setup.outputs.env_prefix }}"
           
           docker build \
             --build-arg VITE_BASE_URL="$BASE_URL" \
@@ -234,9 +166,6 @@ jobs:
             --platform=managed \
             --quiet
 
-  # ============================================
-  # BACKEND DEPLOYMENT JOB - Runs in parallel with frontend
-  # ============================================
   deploy-backend:
     runs-on: ubuntu-latest
     needs: setup
@@ -249,6 +178,8 @@ jobs:
           repository: ${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}
           ref: ${{ github.event.client_payload.ref || 'main' }}
           token: ${{ secrets.PRIVATETOKENPULL }}
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -262,545 +193,368 @@ jobs:
 
       - name: Enable Required APIs
         run: |
-          echo "🔧 Enabling required Google Cloud APIs..."
-          gcloud services enable cloudfunctions.googleapis.com --quiet || true
-          gcloud services enable cloudbuild.googleapis.com --quiet || true
-          gcloud services enable iam.googleapis.com --quiet || true
-          gcloud services enable run.googleapis.com --quiet || true
-          echo "✅ APIs enabled"
+          # Enable APIs in correct dependency order for Gen2 Cloud Functions
+          for api in run cloudbuild cloudfunctions iam; do
+            gcloud services enable ${api}.googleapis.com --quiet || true
+          done
 
       - name: Check for Changes in Backend
         id: check_backend
         run: |
           set -euo pipefail
+          git fetch --unshallow --tags || true
           
-          git fetch --unshallow || true
-          
-          # Try to find the base commit
           BRANCH="${{ needs.setup.outputs.branch }}"
+          ENV="${{ needs.setup.outputs.env }}"
+          REPO_ID="${{ needs.setup.outputs.repo }}"
+          REPO_ID=$(echo "$REPO_ID" | sed 's/.*\///')
+          DEPLOY_TAG="deployed-${REPO_ID}-${ENV}-backend"
           CHANGED=""
+          LAST_DEPLOY_SHA=""
           
-          if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
-            # Branch exists on origin, compare against it
-            BASE_SHA=$(git merge-base "origin/$BRANCH" HEAD 2>/dev/null || echo "")
-            if [[ -n "$BASE_SHA" ]] && [[ "$BASE_SHA" != "$(git rev-parse HEAD)" ]]; then
-              # Compare against branch's previous commit
-              CHANGED=$(git diff --name-only "$BASE_SHA" HEAD | grep '^backend/' || true)
-            fi
-          fi
-          
-          # If no changes detected and branch exists, check if files exist (for first-time deployments)
-          if [[ -z "$CHANGED" ]]; then
-            # Check if backend files exist in current commit
-            if git ls-tree -r --name-only HEAD | grep -q '^backend/'; then
-              # Files exist, check if this is different from main (in case branches have same commits)
-              if git rev-parse --verify "origin/main" >/dev/null 2>&1; then
-                MAIN_SHA=$(git rev-parse "origin/main")
-                CURRENT_SHA=$(git rev-parse HEAD)
-                # If current commit is different from main, or if main doesn't have these files, deploy
-                if [[ "$CURRENT_SHA" != "$MAIN_SHA" ]] || ! git ls-tree -r --name-only "$MAIN_SHA" | grep -q '^backend/'; then
-                  CHANGED="backend/"
-                  echo "Backend files exist and differ from main - deploying"
-                fi
-              else
-                # No main branch, but files exist - deploy
-                CHANGED="backend/"
-                echo "Backend files exist - deploying"
-              fi
-            fi
-          fi
-          if [[ -z "$CHANGED" ]]; then
-            echo "Backend not changed."
-            echo "has_changes=false" >> $GITHUB_OUTPUT
+          # Try to find last successful deployment tag
+          if git rev-parse --verify "$DEPLOY_TAG" >/dev/null 2>&1; then
+            LAST_DEPLOY_SHA=$(git rev-parse "$DEPLOY_TAG")
+            echo "📌 Found last deployment tag: $DEPLOY_TAG at commit $LAST_DEPLOY_SHA"
+            # Compare from last deployment to HEAD
+            CHANGED=$(git diff --name-only "$LAST_DEPLOY_SHA" HEAD | grep '^backend/' || true)
+          elif git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+            # No deployment tag found, compare with origin/branch
+            echo "📌 No deployment tag found, comparing with origin/$BRANCH"
+            CHANGED=$(git diff --name-only "origin/$BRANCH" HEAD | grep '^backend/' || true)
           else
-            echo "Backend has changes."
+            # Branch doesn't exist on origin - deploy if backend files exist
+            echo "📌 New branch, checking if backend files exist"
+            git ls-tree -r --name-only HEAD | grep -q '^backend/' && CHANGED="backend/"
+          fi
+          
+          if [[ -n "$CHANGED" ]]; then
+            echo "✅ Backend changes detected"
             echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "last_deploy_sha=$LAST_DEPLOY_SHA" >> $GITHUB_OUTPUT
+            echo "deploy_tag=$DEPLOY_TAG" >> $GITHUB_OUTPUT
+            # Store in environment for use in deployment step
+            echo "LAST_DEPLOY_SHA=$LAST_DEPLOY_SHA" >> $GITHUB_ENV
+            echo "DEPLOY_TAG=$DEPLOY_TAG" >> $GITHUB_ENV
+          else
+            echo "⏭️  No backend changes detected"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Deploy Changed Backend Functions
         if: steps.check_backend.outputs.has_changes == 'true'
+        env:
+          LAST_DEPLOY_SHA: ${{ steps.check_backend.outputs.last_deploy_sha }}
+          DEPLOY_TAG: ${{ steps.check_backend.outputs.deploy_tag }}
         run: |
           set -euo pipefail
-          echo "Detecting and deploying changed Cloud Functions in backend/..."
-          echo "Environment: ${{ needs.setup.outputs.env }}"
-          echo "Function prefix: ${{ needs.setup.outputs.env_prefix }}"
           
-          git fetch --unshallow || true
-          
-          # Function to extract entry point from main.py
-          # Handles multiple patterns: def func(request), def func(request: Request), etc.
+          # Helper functions
           extract_entry_point() {
             local main_file="$1"
-            # Try multiple patterns
-            ENTRY_POINT=$(grep -Po '^def\s+\K\w+(?=\s*\([^)]*request[^)]*\):)' "$main_file" | head -n1)
-            
-            # If not found, try simpler pattern
-            if [[ -z "$ENTRY_POINT" ]]; then
-              ENTRY_POINT=$(grep -E '^def\s+\w+\s*\(' "$main_file" | head -n1 | grep -oP 'def\s+\K\w+')
-            fi
-            
-            echo "$ENTRY_POINT"
+            grep -Po '^def\s+\K\w+(?=\s*\([^)]*request[^)]*\):)' "$main_file" 2>/dev/null | head -n1 || \
+            grep -E '^def\s+\w+\s*\(' "$main_file" 2>/dev/null | head -n1 | grep -oP 'def\s+\K\w+'
           }
           
-          # Function to detect required environment variables for a function
-          # Scans main.py for os.getenv() calls to determine what env vars are needed
-          # Automatically detects ALL environment variables needed by scanning os.getenv() calls
           get_function_env_vars() {
-            local main_file="$1"
-            local fn_dir="$2"
-            local required_vars=""
-            
-            # Base DB variables (all functions need these)
+            local fn_dir="$1"
             local base_vars="DB_HOST,DB_USER,DB_PASS,DB_NAME,DB_PORT,DB_SCHEMA"
             
-            # Automatically detect ALL os.getenv() calls in the function code
-            # Extract variable names from patterns like: os.getenv('VAR_NAME') or os.getenv("VAR_NAME")
-            if [[ -f "$main_file" ]]; then
-              # Find all os.getenv calls and extract variable names
-              detected_vars=$(grep -oE "os\.getenv\(['\"]([A-Z_][A-Z0-9_]*)['\"]" "$main_file" 2>/dev/null | \
+            if [[ -d "$fn_dir" ]]; then
+              detected_vars=$(find "$fn_dir" -name "*.py" -type f -exec grep -oE "os\.getenv\(['\"]([A-Z_][A-Z0-9_]*)['\"]" {} \; 2>/dev/null | \
                 sed "s/os\.getenv(['\"]//" | sed "s/['\"]//" | sort -u | tr '\n' ',' | sed 's/,$//')
               
-              if [[ -n "$detected_vars" ]]; then
-                echo "🔍 Auto-detected env vars from code: $detected_vars"
-                required_vars="$detected_vars"
-              fi
-            fi
-            
-            # Combine base vars with detected vars (avoid duplicates)
-            IFS=',' read -ra BASE_ARRAY <<< "$base_vars"
-            IFS=',' read -ra DETECTED_ARRAY <<< "$required_vars"
-            
-            local combined_vars="$base_vars"
-            for var in "${DETECTED_ARRAY[@]}"; do
-              var=$(echo "$var" | xargs) # trim whitespace
-              # Check if it's already in base vars
-              skip=false
-              for base_var in "${BASE_ARRAY[@]}"; do
-                if [[ "$var" == "$base_var" ]]; then
-                  skip=true
-                  break
-                fi
+              [[ -n "$detected_vars" ]] && echo "🔍 Auto-detected: $detected_vars"
+              
+              # Combine and deduplicate
+              IFS=',' read -ra DETECTED <<< "$detected_vars"
+              local combined="$base_vars"
+              for var in "${DETECTED[@]}"; do
+                var=$(echo "$var" | xargs)
+                [[ "$base_vars" != *"$var"* ]] && [[ -n "$var" ]] && combined="${combined},${var}"
               done
-              if [[ "$skip" == "false" ]] && [[ -n "$var" ]]; then
-                combined_vars="${combined_vars},${var}"
-              fi
-            done
-            
-            # Remove trailing comma
-            combined_vars=$(echo "$combined_vars" | sed 's/,$//')
-            
-            echo "$combined_vars"
+              echo "$combined"
+            else
+              echo "$base_vars"
+            fi
           }
           
-          # Automatically builds env vars YAML file by detecting what's needed and fetching from secrets
-          build_function_env_vars_file() {
+          build_env_vars_file() {
             local required_vars="$1"
-            local db_env_vars="$2"
-            local env_vars_file="$3"
+            local db_secrets="$2"
+            local env_file="$3"
             
-            # Debug: Check if db_env_vars is empty
-            if [[ -z "$db_env_vars" ]]; then
-              echo "❌ ERROR in build_function_env_vars_file: db_env_vars is empty!"
-              return 1
-            fi
+            [[ -z "$db_secrets" ]] && { echo "❌ ERROR: db_secrets is empty!"; return 1; }
             
-            echo "🔍 Building function env vars YAML file..."
-            echo "   Input db_env_vars length: ${#db_env_vars}"
-            
-            # Parse DB env vars - they are in KEY=VALUE format (newline-separated from secrets)
             local temp_file=$(mktemp)
+            echo "$db_secrets" | grep '=' > "$temp_file"
             
-            # Secrets are in newline-separated KEY=VALUE format, just filter for lines with =
-            echo "$db_env_vars" | grep '=' > "$temp_file"
+            echo "ENV: ${{ needs.setup.outputs.env }}" > "$env_file"
             
-            # Debug: Show what was parsed
-            echo "   Parsed variables from secrets (first 10):"
-            head -10 "$temp_file" | while IFS= read -r line; do
-              var_name=$(echo "$line" | cut -d'=' -f1)
-              if [[ "$var_name" == "DB_PASS" ]] || [[ "$var_name" == "DB_USER" ]]; then
-                echo "     $var_name=***"
-              else
-                echo "     $line"
-              fi
-            done
-            
-            # Start building YAML file
-            echo "ENV: ${{ needs.setup.outputs.env }}" > "$env_vars_file"
-            
-            # ALWAYS include base DB variables first
+            # Add base DB variables
             local base_db_vars=("DB_HOST" "DB_USER" "DB_PASS" "DB_NAME" "DB_PORT" "DB_SCHEMA")
-            local added_count=0
             for var in "${base_db_vars[@]}"; do
-              # Extract the full line with KEY=VALUE
               var_line=$(grep "^${var}=" "$temp_file" | head -n1)
-              if [[ -n "$var_line" ]]; then
-                # Extract value (everything after first =)
-                var_value=$(echo "$var_line" | cut -d'=' -f2-)
-                if [[ -n "$var_value" ]]; then
-                  # For YAML, use double quotes and escape them properly
-                  # Replace " with \" and \ with \\
-                  var_value=$(echo "$var_value" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
-                  # Add to YAML file with double quotes
-                  echo "${var}: \"${var_value}\"" >> "$env_vars_file"
-                  echo "   ✅ Added base DB variable: $var"
-                  ((added_count++)) || true
-                else
-                  echo "   ⚠️  Warning: Empty value for $var"
-                fi
-              else
-                echo "   ⚠️  Warning: Base DB variable $var not found"
-              fi
+              [[ -n "$var_line" ]] && {
+                var_value=$(echo "$var_line" | cut -d'=' -f2- | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                [[ -n "$var_value" ]] && echo "${var}: \"${var_value}\"" >> "$env_file"
+              }
             done
             
-            if [[ $added_count -eq 0 ]]; then
-              echo "   ❌ ERROR: No base DB variables were added!"
-              rm -f "$temp_file" "$env_vars_file"
-              return 1
-            fi
-            
-            # Then add other detected variables - automatically fetch from secrets
+            # Add other detected variables
             IFS=',' read -ra REQUIRED <<< "$required_vars"
             for var in "${REQUIRED[@]}"; do
-              var=$(echo "$var" | xargs) # trim whitespace
+              var=$(echo "$var" | xargs)
               
-              # Skip base DB variables (already added)
+              # Skip if already added
               skip=false
               for base_var in "${base_db_vars[@]}"; do
-                if [[ "$var" == "$base_var" ]]; then
-                  skip=true
-                  break
-                fi
+                [[ "$var" == "$base_var" ]] && skip=true && break
               done
+              [[ "$skip" == "true" ]] && continue
               
-              if [[ "$skip" == "true" ]]; then
-                continue
-              fi
-              
-              # Check if variable exists in DB env vars (from DB secret)
+              # Get from DB secret only
+              [[ "$var" == "BUCKET_NAME" ]] && continue
               var_line=$(grep "^${var}=" "$temp_file" | head -n1)
-              if [[ -n "$var_line" ]]; then
-                # Found in DB secret, use it
-                var_value=$(echo "$var_line" | cut -d'=' -f2-)
-                if [[ -n "$var_value" ]]; then
-                  # For YAML, use double quotes and escape them properly
-                  var_value=$(echo "$var_value" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
-                  echo "${var}: \"${var_value}\"" >> "$env_vars_file"
-                  echo "   ✅ Added $var from DB secret"
-                fi
-              else
-                # Not in DB secret, try to get from individual secret
-                secret_value=""
-                case "$var" in
-                  BASE_URL)
-                    secret_value="${{ secrets.BASE_URL }}"
-                    ;;
-                  SEND_EMAIL_URL)
-                    secret_value="${{ secrets.SEND_EMAIL_URL }}"
-                    ;;
-                  APP_URL)
-                    secret_value="${{ secrets.APP_URL }}"
-                    ;;
-                  EMAIL_TEMPLATE)
-                    secret_value="${{ secrets.EMAIL_TEMPLATE }}"
-                    ;;
-                  BUCKET_NAME)
-                    # BUCKET_NAME is handled separately, skip here
-                    continue
-                    ;;
-                  OPENAI_API_KEY)
-                    secret_value="${{ secrets.OPENAI_API_KEY }}"
-                    ;;
-                  *)
-                    echo "   ⚠️  Variable $var detected but not found in secrets (add to workflow if needed)"
-                    continue
-                    ;;
-                esac
-                
-                if [[ -n "$secret_value" ]]; then
-                  # For YAML, use double quotes and escape them properly
-                  secret_value=$(echo "$secret_value" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
-                  echo "${var}: \"${secret_value}\"" >> "$env_vars_file"
-                  echo "   ✅ Added $var from individual secret"
-                fi
-              fi
+              [[ -n "$var_line" ]] && {
+                var_value=$(echo "$var_line" | cut -d'=' -f2- | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                [[ -n "$var_value" ]] && echo "${var}: \"${var_value}\"" >> "$env_file"
+              }
             done
             
             rm -f "$temp_file"
-            echo "$env_vars_file"
+            echo "$env_file"
           }
           
-          # Function to check if function uses bucket trigger
-          # Bucket-triggered functions are triggered by Cloud Storage events (file uploads)
-          # HTTP-triggered functions that use storage (like uploadCv_v2) should NOT be detected as bucket triggers
           is_bucket_trigger() {
             local main_file="$1"
             local fn_dir="$2"
-            
-            # Check deployment comments for explicit --trigger-bucket
-            if grep -q "--trigger-bucket" "$main_file" 2>/dev/null; then
-              return 0
-            fi
-            
-            # Check folder name patterns (for future bucket-triggered functions)
-            # These patterns indicate functions that process files uploaded to buckets
-            if [[ "$fn_dir" == *"CSVtoDB"* ]] || \
-               [[ "$fn_dir" == *"load"* ]] || \
-               [[ "$fn_dir" == *"split"* ]]; then
-              return 0
-            fi
-            
-            # Explicitly exclude known HTTP-triggered functions that use storage
-            # These functions use storage.Client but are HTTP-triggered
-            if [[ "$fn_dir" == *"uploadCv"* ]] || \
-               [[ "$fn_dir" == *"getMasterFile"* ]]; then
-              return 1
-            fi
-            
-            # Check for bucket event handler patterns (functions that receive bucket events)
-            # Bucket-triggered functions typically have event/data parameters, not request
-            if grep -q "def.*event\|def.*data.*bucket\|def.*file.*event" "$main_file" 2>/dev/null; then
-              return 0
-            fi
-            
+            grep -q "--trigger-bucket" "$main_file" 2>/dev/null && return 0
+            [[ "$fn_dir" == *"CSVtoDB"* ]] || [[ "$fn_dir" == *"load"* ]] || [[ "$fn_dir" == *"split"* ]] && return 0
+            [[ "$fn_dir" == *"uploadCv"* ]] || [[ "$fn_dir" == *"getMasterFile"* ]] && return 1
+            grep -q "def.*event\|def.*data.*bucket\|def.*file.*event" "$main_file" 2>/dev/null && return 0
             return 1
           }
           
-          # Use process substitution to avoid subshell issues
-          DEPLOYED_COUNT=0
-          SKIPPED_COUNT=0
-          
-          # Store results in array to avoid subshell issues
-          while IFS= read -r MAIN_FILE; do
-            fn_dir=$(dirname "$MAIN_FILE")
-            fn_folder=$(basename "$fn_dir")
+          set_iam_policy() {
+            local function_name="$1"
+            echo "🔐 Setting IAM policy for public access..."
             
-            # Check for changes
-            BRANCH="${{ needs.setup.outputs.branch }}"
-            CHANGED_FILES=""
-            
-            if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
-              BASE_SHA=$(git merge-base "origin/$BRANCH" HEAD 2>/dev/null || echo "")
-              if [[ -n "$BASE_SHA" ]] && [[ "$BASE_SHA" != "$(git rev-parse HEAD)" ]]; then
-                CHANGED_FILES=$(git diff --name-only "$BASE_SHA" HEAD -- "$fn_dir" || echo "")
-              fi
-            fi
-            
-            if [[ -z "$CHANGED_FILES" ]]; then
-              if git ls-tree -r --name-only HEAD -- "$fn_dir" | grep -q .; then
-                echo "📝 Deploying $fn_folder (exists in current commit)"
-              else
-                echo "⏭️  Skipping $fn_folder (no changes detected)"
-                ((SKIPPED_COUNT++)) || true
-                continue
-              fi
-            else
-              echo "📝 Changes detected in $fn_folder"
-            fi
-            
-            # Extract entry point from main.py
-            ENTRY_POINT=$(extract_entry_point "$MAIN_FILE")
-            
-            if [[ -z "$ENTRY_POINT" ]]; then
-              echo "⚠️  No entry point found in $MAIN_FILE. Skipping..."
-              ((SKIPPED_COUNT++)) || true
-              continue
-            fi
-            
-            # Determine function name with environment prefix
-            # Check if folder name contains _v2 to identify v2 functions
-            # Some v2 functions have entry points without _v2 suffix
-            ENV_PREFIX="${{ needs.setup.outputs.env_prefix }}"
-            if [[ "$fn_folder" == *_v2 ]]; then
-              # V2 function folder - ensure entry point has _v2 suffix
-              if [[ "$ENTRY_POINT" == *_v2 ]]; then
-                # Entry point already has _v2: dev_save_employee_skill_v2
-                FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}"
-              else
-                # Entry point missing _v2: add it: dev_get_master_certificates_v2
-                FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}_v2"
-              fi
-            else
-              # Legacy function: dev_save_employee or save_employee
-              FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}"
-            fi
-            
-            # Detect required environment variables for this function
-            REQUIRED_ENV_VARS=$(get_function_env_vars "$MAIN_FILE" "$fn_dir")
-            
-            # Get DB credentials directly from secrets (no setup job dependency)
-            echo "📋 Retrieving DB credentials directly from secrets..."
-            REPO="${{ needs.setup.outputs.repo }}"
-            BRANCH="${{ needs.setup.outputs.branch }}"
-            
-            # Auto-determine which DB secret to use based on repo and branch
-            if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
-              DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_PROD }}"
-              echo "✅ Using DB_PROD secret for: skill-matrix (main/production)"
-            elif [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" != "main" ]]; then
-              DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV }}"
-              echo "✅ Using DB_DEV secret for: skill-matrix (development)"
-            elif [[ "$REPO" == "jktech-training/skill-matrix-V2" ]] && [[ "$BRANCH" != "main" ]]; then
-              DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV_V2 }}"
-              echo "✅ Using DB_DEV_V2 secret for: skill-matrix-V2 (development)"
-            else
-              DB_ENV_VARS_FROM_SECRETS="${{ secrets.DB_DEV_V2 }}"
-              echo "✅ Using DB_DEV_V2 secret (default/fallback)"
-            fi
-            
-            # Verify secret was retrieved
-            if [[ -z "$DB_ENV_VARS_FROM_SECRETS" ]]; then
-              echo "❌ ERROR: DB credentials secret is empty!"
-              exit 1
-            fi
-            
-            # Keep secrets in original format (newline-separated, no conversion to comma)
-            # Just clean up empty lines and trim whitespace
-            DB_ENV_VARS_FROM_SECRETS=$(echo "$DB_ENV_VARS_FROM_SECRETS" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            
-            echo "✅ DB credentials retrieved from secrets (length: ${#DB_ENV_VARS_FROM_SECRETS} chars)"
-            
-            # Build function environment variables YAML file (includes DB credentials from secrets)
-            ENV_VARS_FILE=$(mktemp)
-            if ! build_function_env_vars_file "$REQUIRED_ENV_VARS" "$DB_ENV_VARS_FROM_SECRETS" "$ENV_VARS_FILE"; then
-              echo "❌ ERROR: Failed to build environment variables file!"
-              exit 1
-            fi
-            
-            # Verify DB credentials are included in the YAML file
-            if grep -q "^DB_HOST:" "$ENV_VARS_FILE" && \
-               grep -q "^DB_USER:" "$ENV_VARS_FILE" && \
-               grep -q "^DB_PASS:" "$ENV_VARS_FILE" && \
-               grep -q "^DB_NAME:" "$ENV_VARS_FILE"; then
-              echo "✅ Verified: DB credentials from secrets are included"
-              echo "   Environment variables file created: $ENV_VARS_FILE"
-              echo "   Variables in file:"
-              grep -E "^[A-Z_]+:" "$ENV_VARS_FILE" | sed 's/\(DB_PASS:\).*/DB_PASS:***/' | sed 's/\(DB_USER:\).*/DB_USER:***/' | head -10
-            else
-              echo "❌ ERROR: DB credentials missing from environment variables file!"
-              echo "   File contents:"
-              cat "$ENV_VARS_FILE"
-              rm -f "$ENV_VARS_FILE"
-              exit 1
-            fi
-            
-            # Add BUCKET_NAME if function requires it (for bucket trigger functions or uploadCv)
-            BUCKET_NAME="${{ needs.setup.outputs.bucket_name }}"
-            if grep -q "BUCKET_NAME" <<< "$REQUIRED_ENV_VARS"; then
-              echo "BUCKET_NAME: \"${BUCKET_NAME}\"" >> "$ENV_VARS_FILE"
-            fi
-            
-            # Verify OPENAI_API_KEY is included if required
-            if grep -q "OPENAI_API_KEY" <<< "$REQUIRED_ENV_VARS"; then
-              if ! grep -q "^OPENAI_API_KEY:" "$ENV_VARS_FILE"; then
-                echo "❌ ERROR: OPENAI_API_KEY is required but not found in secrets!"
-                echo "   Please ensure OPENAI_API_KEY is included in your DB secret or add it as a separate secret."
-                rm -f "$ENV_VARS_FILE"
-                exit 1
-              else
-                echo "✅ Verified: OPENAI_API_KEY is included"
-              fi
-            fi
-            
-            echo "🚀 Deploying $FUNCTION_NAME from $fn_folder"
-            echo "   Entry point: $ENTRY_POINT"
-            echo "   Environment: ${{ needs.setup.outputs.env }}"
-            echo "   Directory: $fn_dir"
-            echo "   Required env vars: $REQUIRED_ENV_VARS"
-            
-            # Check if it's a bucket trigger function
-            if is_bucket_trigger "$MAIN_FILE" "$fn_dir"; then
-              echo "   Trigger: Cloud Storage (bucket)"
-              
-              gcloud functions deploy "$FUNCTION_NAME" \
-                --runtime python310 \
-                --trigger-bucket ${BUCKET_NAME} \
-                --entry-point "$ENTRY_POINT" \
-                --source "$fn_dir" \
-                --service-account training-project-419308@appspot.gserviceaccount.com \
-                --region asia-south1 \
-                --gen2 \
-                --memory 512Mi \
-                --timeout 540s \
-                --env-vars-file "$ENV_VARS_FILE" \
-                --quiet
-              
-              # Clean up temp file
-              rm -f "$ENV_VARS_FILE"
-              
-              if [[ $? -eq 0 ]]; then
-                echo "✅ Successfully deployed: $FUNCTION_NAME (bucket trigger)"
-                ((DEPLOYED_COUNT++)) || true
-              else
-                echo "❌ Failed to deploy: $FUNCTION_NAME"
-                ((SKIPPED_COUNT++)) || true
-              fi
-            else
-              echo "   Trigger: HTTP"
-              
-              gcloud functions deploy "$FUNCTION_NAME" \
-                --runtime python310 \
-                --trigger-http \
-                --entry-point "$ENTRY_POINT" \
-                --source "$fn_dir" \
-                --service-account training-project-419308@appspot.gserviceaccount.com \
-                --allow-unauthenticated \
-                --gen2 \
-                --region asia-south1 \
-                --env-vars-file "$ENV_VARS_FILE" \
-                --quiet
-              
-              # Clean up temp file
-              rm -f "$ENV_VARS_FILE"
-              
-              if [[ $? -eq 0 ]]; then
-                # Ensure public access with IAM policy binding
-                # Gen2 functions use Cloud Run IAM, so we use run services command
-                echo "🔐 Setting IAM policy for public access (Gen2 uses Cloud Run IAM)..."
-                if gcloud run services add-iam-policy-binding "$FUNCTION_NAME" \
+            # Wait for service to be available (usually ready within 5-10 seconds)
+            for i in {1..5}; do
+              if gcloud run services describe "$function_name" --region=asia-south1 --platform=managed --quiet >/dev/null 2>&1; then
+                # Check if already configured
+                if gcloud run services get-iam-policy "$function_name" \
+                  --region=asia-south1 --platform=managed \
+                  --format="value(bindings[].members)" 2>/dev/null | grep -q "allUsers"; then
+                  echo "✅ Public access already configured"
+                  return 0
+                fi
+                
+                # Set IAM policy using GitHub Actions service account
+                if gcloud run services add-iam-policy-binding "$function_name" \
                   --region=asia-south1 \
                   --member="allUsers" \
                   --role="roles/run.invoker" \
                   --platform=managed \
                   --quiet 2>&1; then
-                  echo "✅ IAM policy binding successful"
+                  echo "✅ IAM policy set successfully"
+                  return 0
                 else
-                  # Check if policy already exists
-                  echo "⚠️  IAM policy binding command failed, checking if policy already exists..."
-                  if gcloud run services get-iam-policy "$FUNCTION_NAME" \
+                  # Retry once after a short delay
+                  sleep 1
+                  if gcloud run services add-iam-policy-binding "$function_name" \
                     --region=asia-south1 \
+                    --member="allUsers" \
+                    --role="roles/run.invoker" \
                     --platform=managed \
-                    --format="value(bindings[].members)" 2>/dev/null | grep -q "allUsers"; then
-                    echo "✅ Public access already configured"
+                    --quiet 2>&1; then
+                    echo "✅ IAM policy set successfully (on retry)"
+                    return 0
                   else
-                    echo "❌ IAM policy binding failed - attempting alternative method..."
-                    # Try without --quiet to see the error
-                    gcloud run services add-iam-policy-binding "$FUNCTION_NAME" \
-                      --region=asia-south1 \
-                      --member="allUsers" \
-                      --role="roles/run.invoker" \
-                      --platform=managed || \
-                      echo "⚠️  Manual IAM policy binding may be required for $FUNCTION_NAME"
+                    echo "⚠️  IAM policy setting failed (function deployed successfully)"
+                    return 0
                   fi
                 fi
-                
-                echo "✅ Successfully deployed: $FUNCTION_NAME (HTTP trigger)"
-                ((DEPLOYED_COUNT++)) || true
-              else
-                echo "❌ Failed to deploy: $FUNCTION_NAME"
-                ((SKIPPED_COUNT++)) || true
               fi
+              [[ $i -lt 5 ]] && sleep 2
+            done
+            
+            echo "⚠️  Service not available - IAM policy setting skipped"
+            return 0
+          }
+          
+          # Main deployment loop
+          DEPLOYED_COUNT=0
+          SKIPPED_COUNT=0
+          BRANCH="${{ needs.setup.outputs.branch }}"
+          ENV_PREFIX="${{ needs.setup.outputs.env_prefix }}"
+          REPO="${{ needs.setup.outputs.repo }}"
+          
+          # Determine DB secret
+          if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
+            DB_SECRET="${{ secrets.DB_PROD }}"
+          elif [[ "$REPO" == "jktech-training/skill-matrix" ]]; then
+            DB_SECRET="${{ secrets.DB_DEV }}"
+          else
+            DB_SECRET="${{ secrets.DB_DEV_V2 }}"
+          fi
+          
+          [[ -z "$DB_SECRET" ]] && { echo "❌ ERROR: DB secret is empty!"; exit 1; }
+          DB_SECRET=$(echo "$DB_SECRET" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          
+          # First pass: Collect functions to deploy
+          echo "🔍 Detecting functions to deploy..."
+          declare -a FUNCTIONS_TO_DEPLOY=()
+          declare -a FUNCTION_NAMES=()
+          declare -a FUNCTION_DIRS=()
+          declare -a FUNCTION_ENTRY_POINTS=()
+          declare -a FUNCTION_FOLDERS=()
+          
+          while IFS= read -r MAIN_FILE; do
+            fn_dir=$(dirname "$MAIN_FILE")
+            fn_folder=$(basename "$fn_dir")
+            
+            # Check for changes - compare from last deployment or origin/branch to HEAD
+            CHANGED_FILES=""
+            if [[ -n "$LAST_DEPLOY_SHA" ]] && git rev-parse --verify "$LAST_DEPLOY_SHA" >/dev/null 2>&1; then
+              CHANGED_FILES=$(git diff --name-only "$LAST_DEPLOY_SHA" HEAD -- "$fn_dir" || echo "")
+            elif git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+              CHANGED_FILES=$(git diff --name-only "origin/$BRANCH" HEAD -- "$fn_dir" || echo "")
             fi
             
+            [[ -z "$CHANGED_FILES" ]] && ! git ls-tree -r --name-only HEAD -- "$fn_dir" | grep -q . && {
+              echo "⏭️  Skipping $fn_folder (no changes)"
+              ((SKIPPED_COUNT++)) || true
+              continue
+            }
+            
+            # Extract entry point
+            ENTRY_POINT=$(extract_entry_point "$MAIN_FILE")
+            [[ -z "$ENTRY_POINT" ]] && {
+              echo "⚠️  No entry point in $MAIN_FILE. Skipping..."
+              ((SKIPPED_COUNT++)) || true
+              continue
+            }
+            
+            # Determine function name
+            if [[ "$fn_folder" == *_v2 ]]; then
+              [[ "$ENTRY_POINT" == *_v2 ]] && FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}" || \
+                FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}_v2"
+            else
+              FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}"
+            fi
+            
+            # Add to arrays
+            FUNCTIONS_TO_DEPLOY+=("$MAIN_FILE")
+            FUNCTION_NAMES+=("$FUNCTION_NAME")
+            FUNCTION_DIRS+=("$fn_dir")
+            FUNCTION_ENTRY_POINTS+=("$ENTRY_POINT")
+            FUNCTION_FOLDERS+=("$fn_folder")
+          done < <(find backend -type f -name "main.py")
+          
+          # Display detected functions
+          TOTAL_FUNCTIONS=${#FUNCTIONS_TO_DEPLOY[@]}
+          if [[ $TOTAL_FUNCTIONS -eq 0 ]]; then
+            echo "ℹ️  No functions detected for deployment"
+            exit 0
+          fi
+          
+          echo ""
+          echo "📋 Detected $TOTAL_FUNCTIONS function(s) to deploy:"
+          for i in "${!FUNCTIONS_TO_DEPLOY[@]}"; do
+            echo "   $((i+1)). ${FUNCTION_NAMES[$i]} (${FUNCTION_FOLDERS[$i]})"
+          done
+          echo ""
+          
+          # Second pass: Deploy functions with progress
+          for i in "${!FUNCTIONS_TO_DEPLOY[@]}"; do
+            MAIN_FILE="${FUNCTIONS_TO_DEPLOY[$i]}"
+            FUNCTION_NAME="${FUNCTION_NAMES[$i]}"
+            fn_dir="${FUNCTION_DIRS[$i]}"
+            ENTRY_POINT="${FUNCTION_ENTRY_POINTS[$i]}"
+            fn_folder="${FUNCTION_FOLDERS[$i]}"
+            CURRENT_NUM=$((i+1))
+            
+            echo "🚀 Deploying $CURRENT_NUM/$TOTAL_FUNCTIONS: $FUNCTION_NAME (${fn_folder})"
+            
+            # Build environment variables file
+            REQUIRED_ENV_VARS=$(get_function_env_vars "$fn_dir")
+            ENV_VARS_FILE=$(mktemp)
+            
+            build_env_vars_file "$REQUIRED_ENV_VARS" "$DB_SECRET" "$ENV_VARS_FILE" || {
+              echo "❌ Failed to build env vars file"
+              exit 1
+            }
+            
+            # Verify DB credentials
+            grep -q "^DB_HOST:" "$ENV_VARS_FILE" && grep -q "^DB_USER:" "$ENV_VARS_FILE" && \
+              grep -q "^DB_PASS:" "$ENV_VARS_FILE" && grep -q "^DB_NAME:" "$ENV_VARS_FILE" || {
+              echo "❌ ERROR: DB credentials missing!"
+              cat "$ENV_VARS_FILE"
+              rm -f "$ENV_VARS_FILE"
+              exit 1
+            }
+            
+            # Add BUCKET_NAME if needed
+            [[ "$REQUIRED_ENV_VARS" == *"BUCKET_NAME"* ]] && \
+              echo "BUCKET_NAME: \"${{ needs.setup.outputs.bucket_name }}\"" >> "$ENV_VARS_FILE"
+            
+            # Verify OPENAI_API_KEY if required
+            [[ "$REQUIRED_ENV_VARS" == *"OPENAI_API_KEY"* ]] && \
+              ! grep -q "^OPENAI_API_KEY:" "$ENV_VARS_FILE" && {
+              echo "❌ ERROR: OPENAI_API_KEY required but not found in DB secret!"
+              echo "   Please ensure OPENAI_API_KEY is included in your DB secret (DB_PROD, DB_DEV, or DB_DEV_V2)."
+              rm -f "$ENV_VARS_FILE"
+              exit 1
+            }
+            
+            # Deploy function
+            if is_bucket_trigger "$MAIN_FILE" "$fn_dir"; then
+              gcloud functions deploy "$FUNCTION_NAME" \
+                --runtime python310 --trigger-bucket ${{ needs.setup.outputs.bucket_name }} \
+                --entry-point "$ENTRY_POINT" --source "$fn_dir" \
+                --service-account training-project-419308@appspot.gserviceaccount.com \
+                --region asia-south1 --gen2 --memory 512Mi --timeout 540s \
+                --env-vars-file "$ENV_VARS_FILE" --quiet && {
+                echo "✅ [$CURRENT_NUM/$TOTAL_FUNCTIONS] Deployed: $FUNCTION_NAME (bucket trigger)"
+                ((DEPLOYED_COUNT++)) || true
+              } || {
+                echo "❌ [$CURRENT_NUM/$TOTAL_FUNCTIONS] Failed: $FUNCTION_NAME"
+                ((SKIPPED_COUNT++)) || true
+              }
+            else
+              gcloud functions deploy "$FUNCTION_NAME" \
+                --runtime python310 --trigger-http --entry-point "$ENTRY_POINT" \
+                --source "$fn_dir" --service-account training-project-419308@appspot.gserviceaccount.com \
+                --allow-unauthenticated --gen2 --region asia-south1 \
+                --env-vars-file "$ENV_VARS_FILE" --quiet && {
+                set_iam_policy "$FUNCTION_NAME" || true
+                echo "✅ [$CURRENT_NUM/$TOTAL_FUNCTIONS] Deployed: $FUNCTION_NAME (HTTP trigger)"
+                ((DEPLOYED_COUNT++)) || true
+              } || {
+                echo "❌ [$CURRENT_NUM/$TOTAL_FUNCTIONS] Failed: $FUNCTION_NAME"
+                ((SKIPPED_COUNT++)) || true
+              }
+            fi
+            
+            rm -f "$ENV_VARS_FILE"
           done < <(find backend -type f -name "main.py")
           
           echo ""
-          echo "📊 Backend Deployment Summary:"
+          echo "📊 Deployment Summary:"
           echo "   Environment: ${{ needs.setup.outputs.env }}"
           echo "   Deployed: $DEPLOYED_COUNT functions"
           echo "   Skipped: $SKIPPED_COUNT functions"
           
-          # Exit with error if deployment failed
-          if [[ $DEPLOYED_COUNT -eq 0 ]] && [[ $SKIPPED_COUNT -gt 0 ]]; then
-            echo "⚠️  Warning: No functions were deployed"
-            exit 1
+          # Create/update deployment tag if deployment was successful
+          if [[ $DEPLOYED_COUNT -gt 0 ]] && [[ -n "$DEPLOY_TAG" ]]; then
+            CURRENT_SHA=$(git rev-parse HEAD)
+            echo "🏷️  Creating deployment tag: $DEPLOY_TAG at commit $CURRENT_SHA"
+            git config user.name "GitHub Actions" || true
+            git config user.email "actions@github.com" || true
+            git tag -f "$DEPLOY_TAG" "$CURRENT_SHA" -m "Backend deployment successful - ${{ needs.setup.outputs.env }} - $(date +%Y-%m-%d\ %H:%M:%S)" || true
+            git push origin "$DEPLOY_TAG" --force || echo "⚠️  Could not push tag (may need write permissions)"
           fi
+          
+          [[ $DEPLOYED_COUNT -eq 0 ]] && [[ $SKIPPED_COUNT -gt 0 ]] && exit 1
