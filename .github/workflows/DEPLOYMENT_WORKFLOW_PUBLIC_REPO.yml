@@ -193,16 +193,31 @@ jobs:
 
       - name: Enable Required APIs
         run: |
+          # Enable Service Usage API first (required to enable other APIs)
+          echo "🔧 Enabling Service Usage API..."
+          if ! gcloud services enable serviceusage.googleapis.com --quiet 2>&1; then
+            echo "⚠️  Service Usage API enable failed - APIs may already be enabled or need manual activation"
+            echo "   If this is the first time, enable it manually: https://console.cloud.google.com/apis/library/serviceusage.googleapis.com"
+          else
+            echo "✅ Service Usage API enabled"
+            # Wait a moment for Service Usage API to propagate
+            sleep 3
+          fi
+          
           # Enable APIs in correct dependency order for Gen2 Cloud Functions
+          echo "🔧 Enabling required APIs..."
           for api in run cloudbuild cloudfunctions iam; do
-            gcloud services enable ${api}.googleapis.com --quiet || true
+            echo "   Enabling ${api}.googleapis.com..."
+            gcloud services enable ${api}.googleapis.com --quiet 2>&1 || echo "   ⚠️  ${api} API enable failed (may already be enabled)"
           done
+          echo "✅ API enablement attempt complete"
 
       - name: Check for Changes in Backend
         id: check_backend
         run: |
           set -euo pipefail
-          git fetch --unshallow --tags || true
+          # Fetch full history and tags (ignore error if already unshallow)
+          git fetch --unshallow --tags 2>/dev/null || git fetch --tags || true
           
           BRANCH="${{ needs.setup.outputs.branch }}"
           ENV="${{ needs.setup.outputs.env }}"
@@ -224,16 +239,26 @@ jobs:
             ORIGIN_SHA=$(git rev-parse "origin/$BRANCH")
             HEAD_SHA=$(git rev-parse HEAD)
             
+            echo "   Origin SHA: $ORIGIN_SHA"
+            echo "   HEAD SHA: $HEAD_SHA"
+            
             if [[ "$ORIGIN_SHA" == "$HEAD_SHA" ]]; then
               # Same commit - check if backend files exist (first deployment or redeployment)
               echo "📌 Same commit as origin/$BRANCH, checking if backend files exist"
               if git ls-tree -r --name-only HEAD | grep -q '^backend/'; then
                 CHANGED="backend/"
                 echo "✅ Backend files found - will deploy"
+              else
+                echo "⚠️  No backend files found in current commit"
               fi
             else
               # Different commits - check for changes
+              echo "📌 Different commits, checking for backend changes"
               CHANGED=$(git diff --name-only "origin/$BRANCH" HEAD | grep '^backend/' || true)
+              if [[ -n "$CHANGED" ]]; then
+                echo "✅ Found backend changes:"
+                echo "$CHANGED" | sed 's/^/   - /'
+              fi
             fi
           else
             # Branch doesn't exist on origin - deploy if backend files exist
