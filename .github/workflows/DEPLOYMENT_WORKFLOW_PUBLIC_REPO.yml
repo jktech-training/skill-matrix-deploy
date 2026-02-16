@@ -167,9 +167,12 @@ jobs:
         if: steps.check_frontend.outputs.has_changes == 'true'
         run: |
           BASE_URL="${{ secrets.VITE_BASE_URL }}"
-          [[ "${{ needs.setup.outputs.env }}" == "development" ]] && \
-            [[ "$BASE_URL" != */ ]] && BASE_URL="${BASE_URL}/" && \
+          if [[ "${{ needs.setup.outputs.env }}" == "development" ]]; then
+            # Ensure BASE_URL ends with / before appending env_prefix
+            [[ "$BASE_URL" != */ ]] && BASE_URL="${BASE_URL}/"
+            # Append dev_ prefix
             BASE_URL="${BASE_URL}${{ needs.setup.outputs.env_prefix }}"
+          fi
           
           docker build \
             --build-arg VITE_BASE_URL="$BASE_URL" \
