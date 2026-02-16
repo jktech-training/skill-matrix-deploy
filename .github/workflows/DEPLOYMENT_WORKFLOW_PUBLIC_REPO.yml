@@ -110,20 +110,50 @@ jobs:
         id: check_frontend
         run: |
           set -euo pipefail
-          git fetch --unshallow || true
+          git fetch --unshallow --tags 2>/dev/null || git fetch --tags || true
           
           BRANCH="${{ needs.setup.outputs.branch }}"
           CHANGED=""
           
           if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
-            # Compare all changes from origin/branch to HEAD (includes all commits)
-            CHANGED=$(git diff --name-only "origin/$BRANCH" HEAD | grep '^frontend/' || true)
+            # Compare all changes from origin/branch to HEAD
+            ORIGIN_SHA=$(git rev-parse "origin/$BRANCH")
+            HEAD_SHA=$(git rev-parse HEAD)
+            
+            echo "   Origin SHA: $ORIGIN_SHA"
+            echo "   HEAD SHA: $HEAD_SHA"
+            
+            if [[ "$ORIGIN_SHA" == "$HEAD_SHA" ]]; then
+              # Same commit - check if frontend files exist (first deployment or redeployment)
+              echo "📌 Same commit as origin/$BRANCH, checking if frontend files exist"
+              if git ls-tree -r --name-only HEAD | grep -q '^frontend/'; then
+                CHANGED="frontend/"
+                echo "✅ Frontend files found - will deploy"
+              else
+                echo "⚠️  No frontend files found in current commit"
+              fi
+            else
+              # Different commits - check for changes
+              echo "📌 Different commits, checking for frontend changes"
+              CHANGED=$(git diff --name-only "origin/$BRANCH" HEAD | grep '^frontend/' || true)
+              if [[ -n "$CHANGED" ]]; then
+                echo "✅ Found frontend changes:"
+                echo "$CHANGED" | sed 's/^/   - /'
+              fi
+            fi
           else
             # Branch doesn't exist on origin - deploy if frontend files exist
+            echo "📌 New branch, checking if frontend files exist"
             git ls-tree -r --name-only HEAD | grep -q '^frontend/' && CHANGED="frontend/"
           fi
           
-          [[ -n "$CHANGED" ]] && echo "has_changes=true" >> $GITHUB_OUTPUT || echo "has_changes=false" >> $GITHUB_OUTPUT
+          if [[ -n "$CHANGED" ]]; then
+            echo "✅ Frontend changes detected"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "⏭️  No frontend changes detected"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Set Docker Image Name and Tag
         if: steps.check_frontend.outputs.has_changes == 'true'
