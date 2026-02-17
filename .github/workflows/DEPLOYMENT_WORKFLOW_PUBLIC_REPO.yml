@@ -326,15 +326,39 @@ jobs:
           extract_entry_point() {
             local main_file="$1"
             local fn_folder="$2"
+            local fn_dir="$3"  # Add fn_dir parameter to check trigger type
+            
+            # Determine if this is a bucket trigger function
+            local is_bucket_trigger=false
+            if [[ -n "$fn_dir" ]]; then
+              if grep -q "--trigger-bucket" "$main_file" 2>/dev/null || \
+                 [[ "$fn_dir" == *"CSVtoDB"* ]] || [[ "$fn_dir" == *"load"* ]] || [[ "$fn_dir" == *"split"* ]]; then
+                is_bucket_trigger=true
+              fi
+              # Also check for event parameter in function signatures
+              grep -q "def.*event\|def.*data.*bucket\|def.*file.*event" "$main_file" 2>/dev/null && is_bucket_trigger=true
+            fi
             
             # Convert folder name to expected function name pattern
-            # Try to find function that matches folder name first
             if [[ -n "$fn_folder" ]]; then
               # Remove _v2 suffix from folder for matching
               folder_base="${fn_folder%_v2}"
-              # Try to find function matching folder name (case-insensitive, with variations)
-              matched=$(grep -iPo '^def\s+\K\w+(?=\s*\([^)]*request[^)]*\):)' "$main_file" 2>/dev/null | \
-                grep -iE "(^${folder_base}$|^${fn_folder}$|${folder_base//Employee/employee}|${folder_base//[A-Z]/_&})" | head -n1)
+              # Normalize folder name for matching (CSVtoDB_V2 -> csv_to_db, csvtodb, etc.)
+              folder_normalized=$(echo "$folder_base" | sed 's/\([A-Z]\)/_\1/g' | tr '[:upper:]' '[:lower:]' | sed 's/^_//')
+              
+              if [[ "$is_bucket_trigger" == "true" ]]; then
+                # For Cloud Storage triggers: look for functions with 'event' (and optionally 'context') parameter
+                # Pattern: def function_name(event) or def function_name(event, context)
+                matched=$(grep -iPo '^def\s+\K\w+(?=\s*\([^)]*event[^)]*\):)' "$main_file" 2>/dev/null | \
+                  grep -vE '^(get_db_engine|cors_|helper_|util_|_cors)' | \
+                  grep -iE "(^${folder_base}$|^${fn_folder}$|^${folder_normalized}|csv.*db|load|split)" | head -n1)
+              else
+                # For HTTP triggers: look for functions with 'request' parameter
+                # Pattern: def function_name(request)
+                matched=$(grep -iPo '^def\s+\K\w+(?=\s*\([^)]*request[^)]*\):)' "$main_file" 2>/dev/null | \
+                  grep -vE '^(get_db_engine|cors_|helper_|util_|_cors)' | \
+                  grep -iE "(^${folder_base}$|^${fn_folder}$|${folder_base//Employee/employee}|${folder_base//[A-Z]/_&})" | head -n1)
+              fi
               
               if [[ -n "$matched" ]]; then
                 echo "$matched"
@@ -342,19 +366,27 @@ jobs:
               fi
             fi
             
-            # Skip helper functions (cors_response, cors_handler, etc.)
-            # Try to find main handler function (one with request parameter, excluding helpers)
-            main_handler=$(grep -Po '^def\s+\K\w+(?=\s*\([^)]*request[^)]*\):)' "$main_file" 2>/dev/null | \
-              grep -vE '^(cors_|helper_|util_|_cors)' | head -n1)
+            # Fallback based on trigger type
+            if [[ "$is_bucket_trigger" == "true" ]]; then
+              # For Cloud Storage triggers: find function with 'event' parameter (excluding helpers)
+              # Pattern: def function_name(event) or def function_name(event, context)
+              main_handler=$(grep -Po '^def\s+\K\w+(?=\s*\([^)]*event[^)]*\):)' "$main_file" 2>/dev/null | \
+                grep -vE '^(get_db_engine|cors_|helper_|util_|_cors)' | head -n1)
+            else
+              # For HTTP triggers: find function with 'request' parameter (excluding helpers)
+              # Pattern: def function_name(request)
+              main_handler=$(grep -Po '^def\s+\K\w+(?=\s*\([^)]*request[^)]*\):)' "$main_file" 2>/dev/null | \
+                grep -vE '^(get_db_engine|cors_|helper_|util_|_cors)' | head -n1)
+            fi
             
             if [[ -n "$main_handler" ]]; then
               echo "$main_handler"
               return 0
             fi
             
-            # Fallback: get first function (excluding helpers)
+            # Final fallback: get first function (excluding helpers and get_db_engine)
             grep -E '^def\s+\w+\s*\(' "$main_file" 2>/dev/null | \
-              grep -vE '^(def\s+(cors_|helper_|util_|_cors))' | \
+              grep -vE '^(def\s+(get_db_engine|cors_|helper_|util_|_cors))' | \
               head -n1 | grep -oP 'def\s+\K\w+'
           }
           
@@ -531,8 +563,8 @@ jobs:
               continue
             }
             
-            # Extract entry point (pass folder name to help match correct function)
-            ENTRY_POINT=$(extract_entry_point "$MAIN_FILE" "$fn_folder")
+            # Extract entry point (pass folder name and directory to help match correct function)
+            ENTRY_POINT=$(extract_entry_point "$MAIN_FILE" "$fn_folder" "$fn_dir")
             [[ -z "$ENTRY_POINT" ]] && {
               echo "⚠️  No entry point in $MAIN_FILE. Skipping..."
               ((SKIPPED_COUNT++)) || true
@@ -630,6 +662,7 @@ jobs:
                 --runtime python310 --trigger-http --entry-point "$ENTRY_POINT" \
                 --source "$fn_dir" --service-account training-project-419308@appspot.gserviceaccount.com \
                 --allow-unauthenticated --gen2 --region asia-south1 \
+                --memory 512Mi --timeout 540s \
                 --env-vars-file "$ENV_VARS_FILE" --quiet && {
                 set_iam_policy "$FUNCTION_NAME" || true
                 echo "✅ [$CURRENT_NUM/$TOTAL_FUNCTIONS] Deployed: $FUNCTION_NAME (HTTP trigger)"
