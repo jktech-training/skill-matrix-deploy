@@ -571,6 +571,18 @@ jobs:
               continue
             }
             
+            # Validate entry point function exists
+            if ! grep -q "^def $ENTRY_POINT" "$MAIN_FILE" 2>/dev/null && ! grep -q "^def ${ENTRY_POINT}(" "$MAIN_FILE" 2>/dev/null; then
+              echo "⚠️  Entry point function '$ENTRY_POINT' not found in $MAIN_FILE. Skipping..."
+              ((SKIPPED_COUNT++)) || true
+              continue
+            fi
+            
+            # Check for requirements.txt
+            if [[ ! -f "$fn_dir/requirements.txt" ]]; then
+              echo "⚠️  Warning: requirements.txt not found in $fn_dir for $FUNCTION_NAME"
+            fi
+            
             # Determine function name
             if [[ "$fn_folder" == *_v2 ]]; then
               [[ "$ENTRY_POINT" == *_v2 ]] && FUNCTION_NAME="${ENV_PREFIX}${ENTRY_POINT}" || \
@@ -658,6 +670,12 @@ jobs:
                 ((SKIPPED_COUNT++)) || true
               }
             else
+              echo "🔍 Validating function before deployment:"
+              echo "   Function: $FUNCTION_NAME"
+              echo "   Entry point: $ENTRY_POINT"
+              echo "   Directory: $fn_dir"
+              echo "   Main file: $MAIN_FILE"
+              
               gcloud functions deploy "$FUNCTION_NAME" \
                 --runtime python310 --trigger-http --entry-point "$ENTRY_POINT" \
                 --source "$fn_dir" --service-account training-project-419308@appspot.gserviceaccount.com \
@@ -669,6 +687,12 @@ jobs:
                 ((DEPLOYED_COUNT++)) || true
               } || {
                 echo "❌ [$CURRENT_NUM/$TOTAL_FUNCTIONS] Failed: $FUNCTION_NAME"
+                echo "   📋 Troubleshooting steps:"
+                echo "   1. Check Cloud Run logs: gcloud logging read \"resource.type=cloud_run_revision AND resource.labels.service_name=$FUNCTION_NAME\" --limit 50"
+                echo "   2. Verify entry point '$ENTRY_POINT' exists in $MAIN_FILE"
+                echo "   3. Check for import errors or missing dependencies in requirements.txt"
+                echo "   4. Ensure function handles HTTP requests correctly (Gen2 functions run on Cloud Run)"
+                echo "   5. View logs: https://console.cloud.google.com/logs/viewer?project=training-project-419308&resource=cloud_run_revision&service_name=$FUNCTION_NAME"
                 ((SKIPPED_COUNT++)) || true
               }
             fi
