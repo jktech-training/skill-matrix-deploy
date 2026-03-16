@@ -261,6 +261,7 @@ jobs:
           DEPLOY_TAG="deployed-${REPO_ID}-${ENV}-backend"
           CHANGED=""
           LAST_DEPLOY_SHA=""
+          FULL_DEPLOY="false"
           
           # Try to find last successful deployment tag
           if git rev-parse --verify "$DEPLOY_TAG" >/dev/null 2>&1; then
@@ -282,7 +283,8 @@ jobs:
               echo "📌 Same commit as origin/$BRANCH, checking if backend files exist"
               if git ls-tree -r --name-only HEAD | grep -q '^backend/'; then
                 CHANGED="backend/"
-                echo "✅ Backend files found - will deploy"
+                FULL_DEPLOY="true"
+                echo "✅ Backend files found - will deploy (full backend deploy)"
               else
                 echo "⚠️  No backend files found in current commit"
               fi
@@ -306,9 +308,11 @@ jobs:
             echo "has_changes=true" >> $GITHUB_OUTPUT
             echo "last_deploy_sha=$LAST_DEPLOY_SHA" >> $GITHUB_OUTPUT
             echo "deploy_tag=$DEPLOY_TAG" >> $GITHUB_OUTPUT
+            echo "full_deploy=$FULL_DEPLOY" >> $GITHUB_OUTPUT
             # Store in environment for use in deployment step
             echo "LAST_DEPLOY_SHA=$LAST_DEPLOY_SHA" >> $GITHUB_ENV
             echo "DEPLOY_TAG=$DEPLOY_TAG" >> $GITHUB_ENV
+            echo "FULL_DEPLOY=$FULL_DEPLOY" >> $GITHUB_ENV
           else
             echo "⏭️  No backend changes detected"
             echo "has_changes=false" >> $GITHUB_OUTPUT
@@ -319,6 +323,7 @@ jobs:
         env:
           LAST_DEPLOY_SHA: ${{ steps.check_backend.outputs.last_deploy_sha }}
           DEPLOY_TAG: ${{ steps.check_backend.outputs.deploy_tag }}
+          FULL_DEPLOY: ${{ steps.check_backend.outputs.full_deploy }}
         run: |
           set -euo pipefail
           
@@ -551,18 +556,21 @@ jobs:
             fn_dir=$(dirname "$MAIN_FILE")
             fn_folder=$(basename "$fn_dir")
             
-            # Check for changes in this function's directory since last deployment (or origin/branch)
-            CHANGED_FILES=""
-            if [[ -n "$LAST_DEPLOY_SHA" ]] && git rev-parse --verify "$LAST_DEPLOY_SHA" >/dev/null 2>&1; then
-              CHANGED_FILES=$(git diff --name-only "$LAST_DEPLOY_SHA" HEAD -- "$fn_dir" || echo "")
-            elif git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
-              CHANGED_FILES=$(git diff --name-only "origin/$BRANCH" HEAD -- "$fn_dir" || echo "")
-            fi
-            
-            if [[ -z "$CHANGED_FILES" ]]; then
-              echo "⏭️  Skipping $fn_folder (no changes since last deployment reference)"
-              ((SKIPPED_COUNT++)) || true
-              continue
+            # For a forced full deploy (e.g. first prod run after tagless main), skip per-function diff checks
+            if [[ "${FULL_DEPLOY:-false}" != "true" ]]; then
+              # Check for changes in this function's directory since last deployment (or origin/branch)
+              CHANGED_FILES=""
+              if [[ -n "$LAST_DEPLOY_SHA" ]] && git rev-parse --verify "$LAST_DEPLOY_SHA" >/dev/null 2>&1; then
+                CHANGED_FILES=$(git diff --name-only "$LAST_DEPLOY_SHA" HEAD -- "$fn_dir" || echo "")
+              elif git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+                CHANGED_FILES=$(git diff --name-only "origin/$BRANCH" HEAD -- "$fn_dir" || echo "")
+              fi
+              
+              if [[ -z "$CHANGED_FILES" ]]; then
+                echo "⏭️  Skipping $fn_folder (no changes since last deployment reference)"
+                ((SKIPPED_COUNT++)) || true
+                continue
+              fi
             fi
             
             # Extract entry point (pass folder name and directory to help match correct function)
