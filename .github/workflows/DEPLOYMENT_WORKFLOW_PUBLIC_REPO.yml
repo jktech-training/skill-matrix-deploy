@@ -530,6 +530,8 @@ jobs:
             DB_SECRET="${{ secrets.DB_PROD }}"
           elif [[ "$REPO" == "jktech-training/skill-matrix" ]]; then
             DB_SECRET="${{ secrets.DB_DEV }}"
+          elif [[ "$REPO" == "jktech-training/skill-matrix-v2" ]] && [[ "$BRANCH" == "main" ]]; then
+            DB_SECRET="${{ secrets.DB_PROD_V2 }}"
           else
             DB_SECRET="${{ secrets.DB_DEV_V2 }}"
           fi
