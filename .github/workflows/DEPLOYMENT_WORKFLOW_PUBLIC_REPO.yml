@@ -25,7 +25,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}
+          repository: ${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-v2' }}
           ref: ${{ github.event.client_payload.ref || 'main' }}
           token: ${{ secrets.PRIVATETOKENPULL }}
 
@@ -33,7 +33,7 @@ jobs:
         id: env
         run: |
           BRANCH=${{ github.event.client_payload.ref || 'main' }}
-          REPO=${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}
+          REPO=${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-v2' }}
           DEPLOYMENT_TYPE=${{ github.event.client_payload.deployment_type || 'full' }}
           
           # Determine deployment targets
@@ -43,20 +43,20 @@ jobs:
             *) DEPLOY_BACKEND="true"; DEPLOY_FRONTEND="true" ;;
           esac
           
-          # Determine repository identifier
-          [[ "$REPO" == *"skill-matrix-V2"* ]] && REPO_ID="skill-matrix-V2" || REPO_ID="skill-matrix"
-          
           # Set environment variables
           if [[ "$BRANCH" == "main" ]]; then
             ENV="production"
             ENV_PREFIX=""
-            CLOUD_RUN_SERVICE="$REPO_ID"
+            # Use unified Cloud Run service name without dashes or V2 in URL:
+            # https://skillmatrix-<project-number>.asia-south1.run.app
+            CLOUD_RUN_SERVICE="skillmatrix"
             IMAGE_SUFFIX=""
             BUCKET_NAME="skill_matrix"
           else
             ENV="development"
             ENV_PREFIX="dev_"
-            CLOUD_RUN_SERVICE="${REPO_ID}-dev"
+            # Development service name: https://skillmatrix-dev-<project-number>.asia-south1.run.app
+            CLOUD_RUN_SERVICE="skillmatrix-dev"
             IMAGE_SUFFIX="-dev"
             BUCKET_NAME="dev_skill_matrix"
           fi
@@ -92,7 +92,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}
+          repository: ${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-v2' }}
           ref: ${{ github.event.client_payload.ref || 'main' }}
           token: ${{ secrets.PRIVATETOKENPULL }}
 
@@ -208,7 +208,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-V2' }}
+          repository: ${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-v2' }}
           ref: ${{ github.event.client_payload.ref || 'main' }}
           token: ${{ secrets.PRIVATETOKENPULL }}
           fetch-depth: 0

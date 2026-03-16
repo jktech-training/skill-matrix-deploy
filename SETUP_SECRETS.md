@@ -17,13 +17,13 @@ GitHub Secrets are stored securely in your repository settings and are used to p
 ### Required Secrets for This Workflow:
 
 #### 1. `PRIVATETOKENPULL`
-- **Purpose**: Personal Access Token (PAT) to pull code from the **private repositories** that trigger this workflow
+- **Purpose**: Personal Access Token (PAT) to checkout code from the **private repositories** that trigger this workflow, and to **push deployment tags** after successful deployments
 - **Important**: 
   - This workflow runs in the **PUBLIC repository**, but needs to checkout code from **PRIVATE repositories**
   - The workflow supports multiple private repositories:
     - `jktech-training/skill-matrix-V2` (default)
     - `jktech-training/skill-matrix`
-  - The token must be created by a user who has **read access to BOTH private repositories**
+  - The token must be created by a user who has **write access** to the source private repositories (required for pushing deployment tags)
   - The token must be stored as a secret in the **PUBLIC repository** (where this workflow file is located)
   - The workflow uses `github.event.client_payload.repository` to determine which private repo to checkout
 - **How to create** (Fine-grained Token - Recommended):
@@ -34,7 +34,8 @@ GitHub Secrets are stored securely in your repository settings and are used to p
      - `jktech-training/skill-matrix-V2`
      - `jktech-training/skill-matrix`
   5. **Repository permissions** → Click "+ Add permissions" and select:
-     - **Contents**: Set to **Read** (this allows reading/cloning repository code)
+     - **Contents**: Set to **Read and write** (required: the workflow pushes deployment tags)
+     - **Metadata**: Read (usually included by default)
   6. Click **"Generate token"**
   7. Copy the token value immediately (you won't be able to see it again)
   8. **Store it in the PUBLIC repo's secrets**:
@@ -118,13 +119,15 @@ DB_PASS=Skillmatrix@123
 DB_NAME=Skill_Matrix
 DB_SCHEMA=skill_matrix_v2_dev
 DB_PORT=5432
+BUCKET_NAME=skill-matrix-dev-v2
+GCP_PROJECT=training-project-419308
+
 BASE_URL=https://asia-south1-training-project-419308.cloudfunctions.net/
 SEND_EMAIL_URL=https://asia-south1-training-project-419308.cloudfunctions.net/send_mail
 APP_URL=https://skill-matrix-140475459295.asia-south1.run.app/
 EMAIL_TEMPLATE=<!doctypehtml><html lang=en><meta charset=UTF-8><meta content='width=device-width,initial-scale=1'name=viewport><style>body{font-family:Arial,sans-serif;background-color:#f6f8fa;margin:0;padding:0;color:#333}.container{max-width:600px;margin:40px auto;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1)}.header{background:linear-gradient(to right,#1e40af,#2563eb,#3b82f6);color:#fff;padding:16px 24px;font-size:20px;font-weight:700;text-align:center}.content{padding:24px;line-height:1.6;background-color:#fff;color:#333}.content ul{padding-left:20px;margin-top:8px}.content li{margin-bottom:6px}.button{display:inline-block;margin-top:16px;padding:8px 16px;font-size:14px;color:#fff;background-color:#2563eb;text-decoration:none;border-radius:6px;text-align:center}.footer{padding:16px 24px;background-color:#f1f3f4;font-size:14px;color:#555;text-align:center}.footer strong{color:#202124}@media (prefers-color-scheme:dark){body{background-color:#1a1a1a!important;color:#e0e0e0!important}.container{box-shadow:0 2px 8px rgba(255,255,255,.05)}.header{background:linear-gradient(to right,#4b5563,#1f2937,#111827);color:#e0e0e0!important}.content{background-color:#2a2a2a;color:#e0e0e0}.button{background-color:#4f46e5;color:#fff!important}.footer{background-color:#333!important;color:#aaa!important}.footer strong{color:#fff!important}}</style><div class=container><div class=header>Skill Review Request</div><div class=content><p>Dear Manager,<p>The following skill(s) have been requested for review by <strong>{{requestee_name}}</strong>:<ul>{{requested_skills}}</ul><p>Please review and take the necessary action.<p><a class=button href={{skill_matrix_url}}>Go to Skill Matrix</a><p>Regards,<br><strong>Skill Matrix Review System</strong></div><div class=footer>This is an automated email. Please do not reply.</div></div>
-OPENAI_API_KEY=sk-proj-mH0eUfQljz4q0JtH283gr-OzYtYyKfTsHUhacl4Duj4SmbP
-FVXXNGDjHKpC2DHrtuLPCU0Ir6iT3BlbkFJKNeis982bVJ63jssfIjoAnTtVXEtXyT_-wj
-q2EmL31ZkQktip2Df2D_XdVGl0NZ8-yHyY-okoA
+
+OPENAI_API_KEY=sk-proj-your-openai-api-key-here
   ```
 
 **How to add these secrets:**
