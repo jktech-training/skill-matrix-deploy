@@ -549,7 +549,7 @@ jobs:
             fn_dir=$(dirname "$MAIN_FILE")
             fn_folder=$(basename "$fn_dir")
             
-            # Check for changes - compare from last deployment or origin/branch to HEAD
+            # Check for changes in this function's directory since last deployment (or origin/branch)
             CHANGED_FILES=""
             if [[ -n "$LAST_DEPLOY_SHA" ]] && git rev-parse --verify "$LAST_DEPLOY_SHA" >/dev/null 2>&1; then
               CHANGED_FILES=$(git diff --name-only "$LAST_DEPLOY_SHA" HEAD -- "$fn_dir" || echo "")
@@ -557,11 +557,11 @@ jobs:
               CHANGED_FILES=$(git diff --name-only "origin/$BRANCH" HEAD -- "$fn_dir" || echo "")
             fi
             
-            [[ -z "$CHANGED_FILES" ]] && ! git ls-tree -r --name-only HEAD -- "$fn_dir" | grep -q . && {
-              echo "⏭️  Skipping $fn_folder (no changes)"
+            if [[ -z "$CHANGED_FILES" ]]; then
+              echo "⏭️  Skipping $fn_folder (no changes since last deployment reference)"
               ((SKIPPED_COUNT++)) || true
               continue
-            }
+            fi
             
             # Extract entry point (pass folder name and directory to help match correct function)
             ENTRY_POINT=$(extract_entry_point "$MAIN_FILE" "$fn_folder" "$fn_dir")
