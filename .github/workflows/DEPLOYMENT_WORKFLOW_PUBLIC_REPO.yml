@@ -145,7 +145,6 @@ jobs:
               echo "⚠️  No frontend files found in current commit"
             fi
           elif git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
-          if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
             # Compare all changes from origin/branch to HEAD
             ORIGIN_SHA=$(git rev-parse "origin/$BRANCH")
             HEAD_SHA=$(git rev-parse HEAD)
@@ -316,8 +315,6 @@ jobs:
             fi
           # Try to find last successful deployment tag
           elif git rev-parse --verify "$DEPLOY_TAG" >/dev/null 2>&1; then
-          # Try to find last successful deployment tag
-          if git rev-parse --verify "$DEPLOY_TAG" >/dev/null 2>&1; then
             LAST_DEPLOY_SHA=$(git rev-parse "$DEPLOY_TAG")
             echo "📌 Found last deployment tag: $DEPLOY_TAG at commit $LAST_DEPLOY_SHA"
             # Compare from last deployment to HEAD
