@@ -75,6 +75,8 @@ GitHub Secrets are stored securely in your repository settings and are used to p
 #### 3. Database Secrets
 These are used when deploying Cloud Functions. **Each secret contains all database credentials in key=value format:**
 
+**Important:** The frontend build also reads `BASE_URL` from these same `DB_*` secrets (single source of truth). You do **not** need a separate `VITE_BASE_URL` secret.
+
 **`DB_PROD`** - For `jktech-training/skill-matrix` main branch (production)
 - **Format**: Key-value pairs, one per line
 - **Example content**:
@@ -162,6 +164,7 @@ OPENAI_API_KEY=sk-proj-your-openai-api-key-here
 - ✅ **No JSON needed** - Just use key=value format, one per line
 - ✅ Each secret contains all database credentials and required environment variables
 - ✅ **OPENAI_API_KEY is required** - Make sure to include it in all DB secrets (DB_PROD, DB_DEV, DB_DEV_V2, and DB_PROD_V2)
+- ✅ **BASE_URL is required** - Frontend and backend both read `BASE_URL` from the selected `DB_*` secret
 - ✅ **All environment variables must be in DB secrets** - The workflow only reads from DB secrets, not individual secrets
 - ✅ The workflow automatically parses these and extracts individual values
 - ✅ The workflow automatically detects required environment variables from your code (like OPENAI_API_KEY)

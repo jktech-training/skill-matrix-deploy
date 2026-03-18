@@ -195,7 +195,31 @@ jobs:
       - name: Build and Push Docker Image
         if: steps.check_frontend.outputs.has_changes == 'true'
         run: |
-          BASE_URL="${{ secrets.VITE_BASE_URL }}"
+          # Frontend API base URL is baked at build time (Vite).
+          # We prefer reading BASE_URL from the same DB_* secret used by backend (single source of truth),
+          # and require BASE_URL to be present (VITE_BASE_URL secret is not needed).
+          BASE_URL=""
+
+          REPO="${{ needs.setup.outputs.repo }}"
+          BRANCH="${{ needs.setup.outputs.branch }}"
+
+          # Determine DB secret (same logic pattern as backend)
+          if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
+            DB_SECRET="${{ secrets.DB_PROD }}"
+          elif [[ "$REPO" == "jktech-training/skill-matrix" ]]; then
+            DB_SECRET="${{ secrets.DB_DEV }}"
+          elif [[ "$REPO" == "jktech-training/skill-matrix-v2" ]] && [[ "$BRANCH" == "main" ]]; then
+            DB_SECRET="${{ secrets.DB_PROD_V2 }}"
+          else
+            DB_SECRET="${{ secrets.DB_DEV_V2 }}"
+          fi
+
+          # Extract BASE_URL=... from DB secret if available
+          [[ -z "${DB_SECRET:-}" ]] && { echo "❌ ERROR: DB secret is empty - cannot derive BASE_URL"; exit 1; }
+          secret_base_url=$(echo "$DB_SECRET" | grep -E '^BASE_URL=' | head -n1 | cut -d'=' -f2- || true)
+          [[ -z "${secret_base_url:-}" ]] && { echo "❌ ERROR: BASE_URL=... is missing in the selected DB secret"; exit 1; }
+          BASE_URL="$secret_base_url"
+
           if [[ "${{ needs.setup.outputs.env }}" == "development" ]]; then
             # Ensure BASE_URL ends with / before appending env_prefix
             [[ "$BASE_URL" != */ ]] && BASE_URL="${BASE_URL}/"
