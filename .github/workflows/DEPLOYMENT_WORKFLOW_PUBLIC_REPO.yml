@@ -20,6 +20,7 @@ jobs:
       region: ${{ steps.env.outputs.region }}
       artifact_registry_region: ${{ steps.env.outputs.artifact_registry_region }}
       artifact_registry_repo: ${{ steps.env.outputs.artifact_registry_repo }}
+      force_deploy: ${{ steps.env.outputs.force_deploy }}
       cloud_run_service: ${{ steps.env.outputs.cloud_run_service }}
       image_suffix: ${{ steps.env.outputs.image_suffix }}
       bucket_name: ${{ steps.env.outputs.bucket_name }}
@@ -38,6 +39,7 @@ jobs:
           BRANCH=${{ github.event.client_payload.ref || 'main' }}
           REPO=${{ github.event.client_payload.repository || 'jktech-training/skill-matrix-v2' }}
           DEPLOYMENT_TYPE=${{ github.event.client_payload.deployment_type || 'full' }}
+          FORCE_DEPLOY=${{ github.event.client_payload.force_deploy || 'false' }}
           
           # Determine deployment targets
           case "$DEPLOYMENT_TYPE" in
@@ -85,6 +87,7 @@ jobs:
           echo "region=$REGION" >> $GITHUB_OUTPUT
           echo "artifact_registry_region=$ARTIFACT_REGISTRY_REGION" >> $GITHUB_OUTPUT
           echo "artifact_registry_repo=$ARTIFACT_REGISTRY_REPO" >> $GITHUB_OUTPUT
+          echo "force_deploy=$FORCE_DEPLOY" >> $GITHUB_OUTPUT
           echo "cloud_run_service=$CLOUD_RUN_SERVICE" >> $GITHUB_OUTPUT
           echo "image_suffix=$IMAGE_SUFFIX" >> $GITHUB_OUTPUT
           echo "bucket_name=$BUCKET_NAME" >> $GITHUB_OUTPUT
@@ -131,8 +134,17 @@ jobs:
           git fetch --unshallow --tags 2>/dev/null || git fetch --tags || true
           
           BRANCH="${{ needs.setup.outputs.branch }}"
+          FORCE_DEPLOY="${{ needs.setup.outputs.force_deploy }}"
           CHANGED=""
           
+          if [[ "$FORCE_DEPLOY" == "true" ]]; then
+            echo "🚨 force_deploy=true - forcing frontend deployment"
+            if git ls-tree -r --name-only HEAD | grep -q '^frontend/'; then
+              CHANGED="frontend/"
+            else
+              echo "⚠️  No frontend files found in current commit"
+            fi
+          elif git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
           if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
             # Compare all changes from origin/branch to HEAD
             ORIGIN_SHA=$(git rev-parse "origin/$BRANCH")
@@ -278,6 +290,7 @@ jobs:
           # Fetch full history and tags, then ensure we're on latest branch tip
           git fetch --unshallow --tags 2>/dev/null || git fetch --tags || true
           BRANCH="${{ needs.setup.outputs.branch }}"
+          FORCE_DEPLOY="${{ needs.setup.outputs.force_deploy }}"
           git fetch origin "$BRANCH" 2>/dev/null || true
           git checkout "origin/$BRANCH" 2>/dev/null || git checkout "$BRANCH" 2>/dev/null || true
           
@@ -293,6 +306,16 @@ jobs:
           LAST_DEPLOY_SHA=""
           FULL_DEPLOY="false"
           
+          if [[ "$FORCE_DEPLOY" == "true" ]]; then
+            echo "🚨 force_deploy=true - forcing full backend deployment"
+            if git ls-tree -r --name-only HEAD | grep -q '^backend/'; then
+              CHANGED="backend/"
+              FULL_DEPLOY="true"
+            else
+              echo "⚠️  No backend files found in current commit (HEAD=$(git rev-parse HEAD))"
+            fi
+          # Try to find last successful deployment tag
+          elif git rev-parse --verify "$DEPLOY_TAG" >/dev/null 2>&1; then
           # Try to find last successful deployment tag
           if git rev-parse --verify "$DEPLOY_TAG" >/dev/null 2>&1; then
             LAST_DEPLOY_SHA=$(git rev-parse "$DEPLOY_TAG")

@@ -279,6 +279,30 @@ Or:
 }
 ```
 
+### Forcing a Redeploy (no new commits)
+
+Sometimes you need to redeploy even when there are **no code changes**, for example:
+- Region changes (e.g. `asia-south1` → `us-central1`)
+- Database migration and only `DB_*` secrets changed
+- Cloud Run/Functions configuration changes that require a new revision
+
+To force redeployment, pass `force_deploy: true` in the dispatch payload.
+
+Example (force full deploy for `skill-matrix-v2` main):
+
+```json
+{
+  "repository": "jktech-training/skill-matrix-v2",
+  "ref": "main",
+  "deployment_type": "full",
+  "force_deploy": true
+}
+```
+
+Notes:
+- `force_deploy: true` bypasses the “no file changes detected” checks and forces redeployment when `frontend/` or `backend/` exists in the repo.
+- If you only want one side, set `deployment_type` to `frontend` or `backend`.
+
 ## Troubleshooting
 
 ### Secrets Not Working?
