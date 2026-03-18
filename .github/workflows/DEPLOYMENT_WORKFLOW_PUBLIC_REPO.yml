@@ -17,6 +17,9 @@ jobs:
       branch: ${{ steps.env.outputs.branch }}
       env: ${{ steps.env.outputs.env }}
       env_prefix: ${{ steps.env.outputs.env_prefix }}
+      region: ${{ steps.env.outputs.region }}
+      artifact_registry_region: ${{ steps.env.outputs.artifact_registry_region }}
+      artifact_registry_repo: ${{ steps.env.outputs.artifact_registry_repo }}
       cloud_run_service: ${{ steps.env.outputs.cloud_run_service }}
       image_suffix: ${{ steps.env.outputs.image_suffix }}
       bucket_name: ${{ steps.env.outputs.bucket_name }}
@@ -60,6 +63,18 @@ jobs:
             IMAGE_SUFFIX="-dev"
             BUCKET_NAME="dev_skill_matrix"
           fi
+
+          # Default region (override per repo/branch as needed)
+          REGION="asia-south1"
+          ARTIFACT_REGISTRY_REGION="asia-south1"
+          ARTIFACT_REGISTRY_REPO="skill-matrix"
+          if [[ "$REPO" == "jktech-training/skill-matrix-v2" ]] && [[ "$BRANCH" == "main" ]]; then
+            ENV="production"
+            ENV_PREFIX=""
+            REGION="us-central1"
+            ARTIFACT_REGISTRY_REGION="us-central1"
+            ARTIFACT_REGISTRY_REPO="skill-matrix-prod"
+          fi
           
           CLOUD_RUN_SERVICE=$(echo "$CLOUD_RUN_SERVICE" | tr '[:upper:]' '[:lower:]')
           
@@ -67,6 +82,9 @@ jobs:
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
           echo "env=$ENV" >> $GITHUB_OUTPUT
           echo "env_prefix=$ENV_PREFIX" >> $GITHUB_OUTPUT
+          echo "region=$REGION" >> $GITHUB_OUTPUT
+          echo "artifact_registry_region=$ARTIFACT_REGISTRY_REGION" >> $GITHUB_OUTPUT
+          echo "artifact_registry_repo=$ARTIFACT_REGISTRY_REPO" >> $GITHUB_OUTPUT
           echo "cloud_run_service=$CLOUD_RUN_SERVICE" >> $GITHUB_OUTPUT
           echo "image_suffix=$IMAGE_SUFFIX" >> $GITHUB_OUTPUT
           echo "bucket_name=$BUCKET_NAME" >> $GITHUB_OUTPUT
@@ -173,29 +191,35 @@ jobs:
             # Append dev_ prefix
             BASE_URL="${BASE_URL}${{ needs.setup.outputs.env_prefix }}"
           fi
+
+          AR_REGION="${{ needs.setup.outputs.artifact_registry_region }}"
+          AR_REPO="${{ needs.setup.outputs.artifact_registry_repo }}"
           
           docker build \
             --build-arg VITE_BASE_URL="$BASE_URL" \
             --build-arg VITE_SSO_URL="${{ secrets.VITE_SSO_URL }}" \
-            -t asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG} \
+            -t ${AR_REGION}-docker.pkg.dev/training-project-419308/${AR_REPO}/${IMAGE_NAME}:${TAG} \
             ./frontend
-          gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
-          docker push asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG}
+          gcloud auth configure-docker ${AR_REGION}-docker.pkg.dev --quiet
+          docker push ${AR_REGION}-docker.pkg.dev/training-project-419308/${AR_REPO}/${IMAGE_NAME}:${TAG}
 
       - name: Deploy Frontend to Cloud Run
         if: steps.check_frontend.outputs.has_changes == 'true'
         run: |
           CLOUD_RUN_SERVICE="${{ needs.setup.outputs.cloud_run_service }}"
+          REGION="${{ needs.setup.outputs.region }}"
+          AR_REGION="${{ needs.setup.outputs.artifact_registry_region }}"
+          AR_REPO="${{ needs.setup.outputs.artifact_registry_repo }}"
           gcloud run deploy ${CLOUD_RUN_SERVICE} \
-            --image=asia-south1-docker.pkg.dev/training-project-419308/skill-matrix/${IMAGE_NAME}:${TAG} \
+            --image=${AR_REGION}-docker.pkg.dev/training-project-419308/${AR_REPO}/${IMAGE_NAME}:${TAG} \
             --platform=managed \
-            --region=asia-south1 \
+            --region=${REGION} \
             --allow-unauthenticated \
             --quiet
           gcloud run services add-iam-policy-binding ${CLOUD_RUN_SERVICE} \
             --member="allUsers" \
             --role="roles/run.invoker" \
-            --region=asia-south1 \
+            --region=${REGION} \
             --platform=managed \
             --quiet
 
@@ -251,10 +275,16 @@ jobs:
         id: check_backend
         run: |
           set -euo pipefail
-          # Fetch full history and tags (ignore error if already unshallow)
+          # Fetch full history and tags, then ensure we're on latest branch tip
           git fetch --unshallow --tags 2>/dev/null || git fetch --tags || true
-          
           BRANCH="${{ needs.setup.outputs.branch }}"
+          git fetch origin "$BRANCH" 2>/dev/null || true
+          git checkout "origin/$BRANCH" 2>/dev/null || git checkout "$BRANCH" 2>/dev/null || true
+          
+          echo "🔍 Debug: HEAD=$(git rev-parse HEAD) branch=$BRANCH"
+          echo "🔍 Root entries: $(git ls-tree -r --name-only HEAD | head -30)"
+          echo "🔍 Backend paths: $(git ls-tree -r --name-only HEAD | grep '^backend/' | head -5)"
+          
           ENV="${{ needs.setup.outputs.env }}"
           REPO_ID="${{ needs.setup.outputs.repo }}"
           REPO_ID=$(echo "$REPO_ID" | sed 's/.*\///')
@@ -277,7 +307,7 @@ jobs:
               FULL_DEPLOY="true"
               echo "✅ Backend files found - will deploy (full backend deploy)"
             else
-              echo "⚠️  No backend files found in current commit"
+              echo "⚠️  No backend files found in current commit (HEAD=$(git rev-parse HEAD))"
             fi
           elif git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
             # Non-production first run: compare with origin/branch
@@ -488,13 +518,14 @@ jobs:
           set_iam_policy() {
             local function_name="$1"
             echo "🔐 Setting IAM policy for public access..."
+            local region="${{ needs.setup.outputs.region }}"
             
             # Wait for service to be available (usually ready within 5-10 seconds)
             for i in {1..5}; do
-              if gcloud run services describe "$function_name" --region=asia-south1 --platform=managed --quiet >/dev/null 2>&1; then
+              if gcloud run services describe "$function_name" --region="$region" --platform=managed --quiet >/dev/null 2>&1; then
                 # Check if already configured
                 if gcloud run services get-iam-policy "$function_name" \
-                  --region=asia-south1 --platform=managed \
+                  --region="$region" --platform=managed \
                   --format="value(bindings[].members)" 2>/dev/null | grep -q "allUsers"; then
                   echo "✅ Public access already configured"
                   return 0
@@ -502,7 +533,7 @@ jobs:
                 
                 # Set IAM policy using GitHub Actions service account
                 if gcloud run services add-iam-policy-binding "$function_name" \
-                  --region=asia-south1 \
+                  --region="$region" \
                   --member="allUsers" \
                   --role="roles/run.invoker" \
                   --platform=managed \
@@ -513,7 +544,7 @@ jobs:
                   # Retry once after a short delay
                   sleep 1
                   if gcloud run services add-iam-policy-binding "$function_name" \
-                    --region=asia-south1 \
+                    --region="$region" \
                     --member="allUsers" \
                     --role="roles/run.invoker" \
                     --platform=managed \
@@ -539,6 +570,7 @@ jobs:
           BRANCH="${{ needs.setup.outputs.branch }}"
           ENV_PREFIX="${{ needs.setup.outputs.env_prefix }}"
           REPO="${{ needs.setup.outputs.repo }}"
+          REGION="${{ needs.setup.outputs.region }}"
           
           # Determine DB secret
           if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
@@ -681,7 +713,7 @@ jobs:
                 --runtime python310 --trigger-bucket ${{ needs.setup.outputs.bucket_name }} \
                 --entry-point "$ENTRY_POINT" --source "$fn_dir" \
                 --service-account training-project-419308@appspot.gserviceaccount.com \
-                --region asia-south1 --gen2 --memory 512Mi --timeout 540s \
+                --region "$REGION" --gen2 --memory 512Mi --timeout 540s \
                 --env-vars-file "$ENV_VARS_FILE" --quiet && {
                 echo "✅ [$CURRENT_NUM/$TOTAL_FUNCTIONS] Deployed: $FUNCTION_NAME (bucket trigger)"
                 ((DEPLOYED_COUNT++)) || true
@@ -699,7 +731,7 @@ jobs:
               gcloud functions deploy "$FUNCTION_NAME" \
                 --runtime python310 --trigger-http --entry-point "$ENTRY_POINT" \
                 --source "$fn_dir" --service-account training-project-419308@appspot.gserviceaccount.com \
-                --allow-unauthenticated --gen2 --region asia-south1 \
+                --allow-unauthenticated --gen2 --region "$REGION" \
                 --memory 512Mi --timeout 540s \
                 --env-vars-file "$ENV_VARS_FILE" --quiet && {
                 set_iam_policy "$FUNCTION_NAME" || true
