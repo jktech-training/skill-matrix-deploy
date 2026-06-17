@@ -251,12 +251,12 @@ jobs:
             --region=${REGION} \
             --allow-unauthenticated \
             --quiet
-          gcloud run services add-iam-policy-binding ${CLOUD_RUN_SERVICE} \
-            --member="allUsers" \
-            --role="roles/run.invoker" \
-            --region=${REGION} \
-            --platform=managed \
-            --quiet
+          # gcloud run services add-iam-policy-binding ${CLOUD_RUN_SERVICE} \
+          #   --member="allUsers" \
+          #   --role="roles/run.invoker" \
+          #   --region=${REGION} \
+          #   --platform=managed \
+          #   --quiet
 
   deploy-backend:
     runs-on: ubuntu-latest
