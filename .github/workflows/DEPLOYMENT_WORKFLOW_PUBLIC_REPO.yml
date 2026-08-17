@@ -136,10 +136,15 @@ jobs:
           BRANCH="${{ needs.setup.outputs.branch }}"
           FORCE_DEPLOY="${{ needs.setup.outputs.force_deploy }}"
           CHANGED=""
+
+          # Do not use grep -q with pipefail: early exit causes SIGPIPE and a false negative.
+          tree_has_prefix() {
+            git ls-tree -r --name-only HEAD | grep "^$1" >/dev/null
+          }
           
           if [[ "$FORCE_DEPLOY" == "true" ]]; then
             echo "🚨 force_deploy=true - forcing frontend deployment"
-            if git ls-tree -r --name-only HEAD | grep -q '^frontend/'; then
+            if tree_has_prefix 'frontend/'; then
               CHANGED="frontend/"
             else
               echo "⚠️  No frontend files found in current commit"
@@ -155,7 +160,7 @@ jobs:
             if [[ "$ORIGIN_SHA" == "$HEAD_SHA" ]]; then
               # Same commit - check if frontend files exist (first deployment or redeployment)
               echo "📌 Same commit as origin/$BRANCH, checking if frontend files exist"
-              if git ls-tree -r --name-only HEAD | grep -q '^frontend/'; then
+              if tree_has_prefix 'frontend/'; then
                 CHANGED="frontend/"
                 echo "✅ Frontend files found - will deploy"
               else
@@ -173,7 +178,7 @@ jobs:
           else
             # Branch doesn't exist on origin - deploy if frontend files exist
             echo "📌 New branch, checking if frontend files exist"
-            git ls-tree -r --name-only HEAD | grep -q '^frontend/' && CHANGED="frontend/"
+            tree_has_prefix 'frontend/' && CHANGED="frontend/"
           fi
           
           if [[ -n "$CHANGED" ]]; then
@@ -318,7 +323,13 @@ jobs:
           
           echo "🔍 Debug: HEAD=$(git rev-parse HEAD) branch=$BRANCH"
           echo "🔍 Root entries: $(git ls-tree -r --name-only HEAD | head -30)"
-          echo "🔍 Backend paths: $(git ls-tree -r --name-only HEAD | grep '^backend/' | head -5)"
+          echo "🔍 Backend paths: $(git ls-tree -r --name-only HEAD | grep '^backend/' | head -5 || true)"
+
+          # Do not use grep -q with pipefail: early exit causes SIGPIPE and a false negative
+          # ("No backend files found") even when backend/ exists — breaks force_deploy.
+          tree_has_prefix() {
+            git ls-tree -r --name-only HEAD | grep "^$1" >/dev/null
+          }
           
           ENV="${{ needs.setup.outputs.env }}"
           REPO_ID="${{ needs.setup.outputs.repo }}"
@@ -330,9 +341,10 @@ jobs:
           
           if [[ "$FORCE_DEPLOY" == "true" ]]; then
             echo "🚨 force_deploy=true - forcing full backend deployment"
-            if git ls-tree -r --name-only HEAD | grep -q '^backend/'; then
+            if tree_has_prefix 'backend/'; then
               CHANGED="backend/"
               FULL_DEPLOY="true"
+              echo "✅ Backend files found - will force full backend deploy"
             else
               echo "⚠️  No backend files found in current commit (HEAD=$(git rev-parse HEAD))"
             fi
@@ -345,7 +357,7 @@ jobs:
           elif [[ "$ENV" == "production" ]]; then
             # No production deployment tag found – force full backend deploy on first prod run
             echo "📌 No production deployment tag found, forcing full backend deploy on $BRANCH"
-            if git ls-tree -r --name-only HEAD | grep -q '^backend/'; then
+            if tree_has_prefix 'backend/'; then
               CHANGED="backend/"
               FULL_DEPLOY="true"
               echo "✅ Backend files found - will deploy (full backend deploy)"
@@ -364,7 +376,7 @@ jobs:
             if [[ "$ORIGIN_SHA" == "$HEAD_SHA" ]]; then
               # Same commit - check if backend files exist (first deployment or redeployment)
               echo "📌 Same commit as origin/$BRANCH, checking if backend files exist"
-              if git ls-tree -r --name-only HEAD | grep -q '^backend/'; then
+              if tree_has_prefix 'backend/'; then
                 CHANGED="backend/"
                 FULL_DEPLOY="true"
                 echo "✅ Backend files found - will deploy (full backend deploy)"
@@ -383,7 +395,7 @@ jobs:
           else
             # Branch doesn't exist on origin - deploy if backend files exist
             echo "📌 New branch, checking if backend files exist"
-            git ls-tree -r --name-only HEAD | grep -q '^backend/' && CHANGED="backend/"
+            tree_has_prefix 'backend/' && CHANGED="backend/"
           fi
           
           if [[ -n "$CHANGED" ]]; then
