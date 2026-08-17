@@ -881,14 +881,26 @@ jobs:
           echo "   Deployed: $DEPLOYED_COUNT functions"
           echo "   Skipped: $SKIPPED_COUNT functions"
           
-          # Create/update deployment tag if deployment was successful
+          # Create/update deployment tag if deployment was successful.
+          # Same tag name every deploy is intentional (movable pointer to last good SHA).
           if [[ $DEPLOYED_COUNT -gt 0 ]] && [[ -n "$DEPLOY_TAG" ]]; then
             CURRENT_SHA=$(git rev-parse HEAD)
             echo "🏷️  Creating deployment tag: $DEPLOY_TAG at commit $CURRENT_SHA"
             git config user.name "GitHub Actions" || true
             git config user.email "actions@github.com" || true
             git tag -f "$DEPLOY_TAG" "$CURRENT_SHA" -m "Backend deployment successful - ${{ needs.setup.outputs.env }} - $(date +%Y-%m-%d\ %H:%M:%S)" || true
-            git push origin "$DEPLOY_TAG" --force || echo "⚠️  Could not push tag (may need write permissions)"
+            if ! git push origin "refs/tags/$DEPLOY_TAG" --force; then
+              echo "⚠️  Could not push tag (may need write permissions) — deploys already succeeded"
+            else
+              echo "✅ Deployment tag updated: $DEPLOY_TAG → $CURRENT_SHA"
+            fi
           fi
-          
-          [[ $DEPLOYED_COUNT -eq 0 ]] && [[ $SKIPPED_COUNT -gt 0 ]] && exit 1
+
+          # Use if/fi (not `[[ ]] && exit`) — with set -e, a failing [[ in an &&-chain
+          # exits the whole step even when deploys succeeded (DEPLOYED_COUNT > 0).
+          if [[ "$DEPLOYED_COUNT" -eq 0 && "$SKIPPED_COUNT" -gt 0 ]]; then
+            echo "❌ No functions deployed successfully"
+            exit 1
+          fi
+
+          echo "✅ Backend deploy step completed (deployed=$DEPLOYED_COUNT, skipped=$SKIPPED_COUNT)"
