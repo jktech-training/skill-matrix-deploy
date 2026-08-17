@@ -195,15 +195,12 @@ jobs:
       - name: Build and Push Docker Image
         if: steps.check_frontend.outputs.has_changes == 'true'
         run: |
-          # Frontend API base URL is baked at build time (Vite).
-          # We prefer reading BASE_URL from the same DB_* secret used by backend (single source of truth),
-          # and require BASE_URL to be present (VITE_BASE_URL secret is not needed).
-          BASE_URL=""
-
+          # Browser uses same-origin `/` (frontend/server.mjs proxies to Cloud Functions).
+          # Absolute *.cloudfunctions.net URLs must NOT be baked into the client bundle.
+          # FUNCTIONS_BASE_URL is set at Cloud Run runtime from the DB_* secret BASE_URL.
           REPO="${{ needs.setup.outputs.repo }}"
           BRANCH="${{ needs.setup.outputs.branch }}"
 
-          # Determine DB secret (same logic pattern as backend)
           if [[ "$REPO" == "jktech-training/skill-matrix" ]] && [[ "$BRANCH" == "main" ]]; then
             DB_SECRET="${{ secrets.DB_PROD }}"
           elif [[ "$REPO" == "jktech-training/skill-matrix" ]]; then
@@ -214,24 +211,24 @@ jobs:
             DB_SECRET="${{ secrets.DB_DEV_V2 }}"
           fi
 
-          # Extract BASE_URL=... from DB secret if available
-          [[ -z "${DB_SECRET:-}" ]] && { echo "❌ ERROR: DB secret is empty - cannot derive BASE_URL"; exit 1; }
+          [[ -z "${DB_SECRET:-}" ]] && { echo "❌ ERROR: DB secret is empty - cannot derive FUNCTIONS_BASE_URL"; exit 1; }
           secret_base_url=$(echo "$DB_SECRET" | grep -E '^BASE_URL=' | head -n1 | cut -d'=' -f2- || true)
           [[ -z "${secret_base_url:-}" ]] && { echo "❌ ERROR: BASE_URL=... is missing in the selected DB secret"; exit 1; }
-          BASE_URL="$secret_base_url"
+          FUNCTIONS_BASE_URL="$secret_base_url"
 
           if [[ "${{ needs.setup.outputs.env }}" == "development" ]]; then
-            # Ensure BASE_URL ends with / before appending env_prefix
-            [[ "$BASE_URL" != */ ]] && BASE_URL="${BASE_URL}/"
-            # Append dev_ prefix
-            BASE_URL="${BASE_URL}${{ needs.setup.outputs.env_prefix }}"
+            [[ "$FUNCTIONS_BASE_URL" != */ ]] && FUNCTIONS_BASE_URL="${FUNCTIONS_BASE_URL}/"
+            # server.mjs treats a base ending in "_" as a name prefix (dev_*)
+            FUNCTIONS_BASE_URL="${FUNCTIONS_BASE_URL}${{ needs.setup.outputs.env_prefix }}"
           fi
+
+          echo "FUNCTIONS_BASE_URL=$FUNCTIONS_BASE_URL" >> $GITHUB_ENV
 
           AR_REGION="${{ needs.setup.outputs.artifact_registry_region }}"
           AR_REPO="${{ needs.setup.outputs.artifact_registry_repo }}"
           
           docker build \
-            --build-arg VITE_BASE_URL="$BASE_URL" \
+            --build-arg VITE_BASE_URL="/" \
             --build-arg VITE_SSO_URL="${{ secrets.VITE_SSO_URL }}" \
             -t ${AR_REGION}-docker.pkg.dev/training-project-419308/${AR_REPO}/${IMAGE_NAME}:${TAG} \
             ./frontend
@@ -245,18 +242,20 @@ jobs:
           REGION="${{ needs.setup.outputs.region }}"
           AR_REGION="${{ needs.setup.outputs.artifact_registry_region }}"
           AR_REPO="${{ needs.setup.outputs.artifact_registry_repo }}"
+          SSO_VERIFY_URL="${{ secrets.VITE_SSO_URL }}"
+          [[ -z "$SSO_VERIFY_URL" ]] && SSO_VERIFY_URL="https://jktech-auth-gateway-140475459295.asia-south1.run.app"
+          # server.mjs expects the /verify endpoint
+          [[ "$SSO_VERIFY_URL" == */verify ]] || SSO_VERIFY_URL="${SSO_VERIFY_URL%/}/verify"
+
+          # SPA remains publicly reachable; Microsoft SSO is enforced in the app/proxy.
+          # Cloud Functions stay private (invoker = this service's runtime SA only).
           gcloud run deploy ${CLOUD_RUN_SERVICE} \
             --image=${AR_REGION}-docker.pkg.dev/training-project-419308/${AR_REPO}/${IMAGE_NAME}:${TAG} \
             --platform=managed \
             --region=${REGION} \
             --allow-unauthenticated \
+            --set-env-vars="FUNCTIONS_BASE_URL=${FUNCTIONS_BASE_URL},SSO_VERIFY_URL=${SSO_VERIFY_URL}" \
             --quiet
-          # gcloud run services add-iam-policy-binding ${CLOUD_RUN_SERVICE} \
-          #   --member="allUsers" \
-          #   --role="roles/run.invoker" \
-          #   --region=${REGION} \
-          #   --platform=managed \
-          #   --quiet
 
   deploy-backend:
     runs-on: ubuntu-latest
@@ -559,53 +558,90 @@ jobs:
             return 1
           }
           
-          set_iam_policy() {
+          set_frontend_invoker() {
+            # Private functions: only the frontend Cloud Run runtime SA may invoke.
             local function_name="$1"
-            echo "🔐 Setting IAM policy for public access..."
             local region="${{ needs.setup.outputs.region }}"
-            
-            # Wait for service to be available (usually ready within 5-10 seconds)
+            local frontend_service="${{ needs.setup.outputs.cloud_run_service }}"
+            echo "🔐 Granting roles/run.invoker on $function_name to frontend SA..."
+
+            local frontend_sa=""
+            frontend_sa=$(gcloud run services describe "$frontend_service" \
+              --region="$region" --platform=managed \
+              --format='value(spec.template.spec.serviceAccountName)' 2>/dev/null || true)
+            if [[ -z "$frontend_sa" ]]; then
+              local project_number
+              project_number=$(gcloud projects describe training-project-419308 --format='value(projectNumber)' 2>/dev/null || true)
+              if [[ -n "$project_number" ]]; then
+                frontend_sa="${project_number}-compute@developer.gserviceaccount.com"
+              fi
+            fi
+            if [[ -z "$frontend_sa" ]]; then
+              echo "⚠️  Could not resolve frontend runtime SA - invoker grant skipped"
+              return 0
+            fi
+            echo "   Frontend SA: $frontend_sa"
+
             for i in {1..5}; do
               if gcloud run services describe "$function_name" --region="$region" --platform=managed --quiet >/dev/null 2>&1; then
-                # Check if already configured
-                if gcloud run services get-iam-policy "$function_name" \
-                  --region="$region" --platform=managed \
-                  --format="value(bindings[].members)" 2>/dev/null | grep -q "allUsers"; then
-                  echo "✅ Public access already configured"
-                  return 0
-                fi
-                
-                # Set IAM policy using GitHub Actions service account
-                if gcloud run services add-iam-policy-binding "$function_name" \
+                # Drop public invoker if present (org policy / BFF model)
+                gcloud run services remove-iam-policy-binding "$function_name" \
                   --region="$region" \
                   --member="allUsers" \
                   --role="roles/run.invoker" \
                   --platform=managed \
-                  --quiet 2>&1; then
-                  echo "✅ IAM policy set successfully"
+                  --quiet 2>/dev/null || true
+
+                if gcloud run services get-iam-policy "$function_name" \
+                  --region="$region" --platform=managed \
+                  --format="json" 2>/dev/null | grep -q "$frontend_sa"; then
+                  echo "✅ Frontend SA already has invoker on $function_name"
                   return 0
-                else
-                  # Retry once after a short delay
-                  sleep 1
-                  if gcloud run services add-iam-policy-binding "$function_name" \
-                    --region="$region" \
-                    --member="allUsers" \
-                    --role="roles/run.invoker" \
-                    --platform=managed \
-                    --quiet 2>&1; then
-                    echo "✅ IAM policy set successfully (on retry)"
-                    return 0
-                  else
-                    echo "⚠️  IAM policy setting failed (function deployed successfully)"
-                    return 0
-                  fi
                 fi
+
+                if gcloud run services add-iam-policy-binding "$function_name" \
+                  --region="$region" \
+                  --member="serviceAccount:${frontend_sa}" \
+                  --role="roles/run.invoker" \
+                  --platform=managed \
+                  --quiet 2>&1; then
+                  echo "✅ Invoker granted to frontend SA"
+                  return 0
+                fi
+                sleep 1
+                if gcloud run services add-iam-policy-binding "$function_name" \
+                  --region="$region" \
+                  --member="serviceAccount:${frontend_sa}" \
+                  --role="roles/run.invoker" \
+                  --platform=managed \
+                  --quiet 2>&1; then
+                  echo "✅ Invoker granted to frontend SA (on retry)"
+                  return 0
+                fi
+                echo "⚠️  Invoker grant failed (function deployed; check IAM permissions on deploy SA)"
+                return 0
               fi
               [[ $i -lt 5 ]] && sleep 2
             done
-            
-            echo "⚠️  Service not available - IAM policy setting skipped"
+
+            echo "⚠️  Service not available - invoker grant skipped"
             return 0
+          }
+
+          prepare_function_source() {
+            # Cloud Functions --source is flat; copy backend/utils next to main.py
+            # so `from utils.sso_auth` / event_publisher imports resolve.
+            local fn_dir="$1"
+            local stage_dir="$2"
+            rm -rf "$stage_dir"
+            mkdir -p "$stage_dir"
+            cp -a "$fn_dir"/. "$stage_dir/"
+            if [[ -d backend/utils ]]; then
+              rm -rf "$stage_dir/utils"
+              cp -a backend/utils "$stage_dir/utils"
+              [[ -f "$stage_dir/utils/__init__.py" ]] || touch "$stage_dir/utils/__init__.py"
+              echo "📦 Packaged backend/utils into deploy source" >&2
+            fi
           }
           
           # Main deployment loop
@@ -637,6 +673,15 @@ jobs:
           declare -a FUNCTION_DIRS=()
           declare -a FUNCTION_ENTRY_POINTS=()
           declare -a FUNCTION_FOLDERS=()
+
+          UTILS_CHANGED=""
+          if [[ "${FULL_DEPLOY:-false}" != "true" ]]; then
+            if [[ -n "$LAST_DEPLOY_SHA" ]] && git rev-parse --verify "$LAST_DEPLOY_SHA" >/dev/null 2>&1; then
+              UTILS_CHANGED=$(git diff --name-only "$LAST_DEPLOY_SHA" HEAD -- backend/utils || echo "")
+            elif git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+              UTILS_CHANGED=$(git diff --name-only "origin/$BRANCH" HEAD -- backend/utils || echo "")
+            fi
+          fi
           
           while IFS= read -r MAIN_FILE; do
             fn_dir=$(dirname "$MAIN_FILE")
@@ -652,6 +697,14 @@ jobs:
                 CHANGED_FILES=$(git diff --name-only "origin/$BRANCH" HEAD -- "$fn_dir" || echo "")
               fi
               
+              # Shared utils (SSO auth / event_publisher) are packaged into each function source
+              if [[ -z "$CHANGED_FILES" && -n "$UTILS_CHANGED" ]]; then
+                if grep -qE 'utils\.(sso_auth|event_publisher|event_types)|from utils' "$MAIN_FILE" 2>/dev/null; then
+                  CHANGED_FILES="backend/utils"
+                  echo "🔁 Including $fn_folder (backend/utils changed)"
+                fi
+              fi
+
               if [[ -z "$CHANGED_FILES" ]]; then
                 echo "⏭️  Skipping $fn_folder (no changes since last deployment reference)"
                 ((SKIPPED_COUNT++)) || true
@@ -741,6 +794,14 @@ jobs:
             # Add BUCKET_NAME if needed
             [[ "$REQUIRED_ENV_VARS" == *"BUCKET_NAME"* ]] && \
               echo "BUCKET_NAME: \"${{ needs.setup.outputs.bucket_name }}\"" >> "$ENV_VARS_FILE"
+
+            # SSO verify URL for functions that call require_sso_bearer / gateway
+            SSO_VERIFY_URL="${{ secrets.VITE_SSO_URL }}"
+            [[ -z "$SSO_VERIFY_URL" ]] && SSO_VERIFY_URL="https://jktech-auth-gateway-140475459295.asia-south1.run.app"
+            [[ "$SSO_VERIFY_URL" == */verify ]] || SSO_VERIFY_URL="${SSO_VERIFY_URL%/}/verify"
+            if ! grep -q "^SSO_VERIFY_URL:" "$ENV_VARS_FILE"; then
+              echo "SSO_VERIFY_URL: \"${SSO_VERIFY_URL}\"" >> "$ENV_VARS_FILE"
+            fi
             
             # Verify OPENAI_API_KEY if required
             [[ "$REQUIRED_ENV_VARS" == *"OPENAI_API_KEY"* ]] && \
@@ -750,12 +811,15 @@ jobs:
               rm -f "$ENV_VARS_FILE"
               exit 1
             }
+
+            DEPLOY_SOURCE=$(mktemp -d)
+            prepare_function_source "$fn_dir" "$DEPLOY_SOURCE"
             
             # Deploy function
             if is_bucket_trigger "$MAIN_FILE" "$fn_dir"; then
               gcloud functions deploy "$FUNCTION_NAME" \
                 --runtime python310 --trigger-bucket ${{ needs.setup.outputs.bucket_name }} \
-                --entry-point "$ENTRY_POINT" --source "$fn_dir" \
+                --entry-point "$ENTRY_POINT" --source "$DEPLOY_SOURCE" \
                 --service-account training-project-419308@appspot.gserviceaccount.com \
                 --region "$REGION" --gen2 --memory 512Mi --timeout 540s \
                 --env-vars-file "$ENV_VARS_FILE" --quiet && {
@@ -772,14 +836,16 @@ jobs:
               echo "   Directory: $fn_dir"
               echo "   Main file: $MAIN_FILE"
               
+              # Private HTTP function (no --allow-unauthenticated / allUsers).
+              # Frontend Cloud Run SA receives roles/run.invoker after deploy.
               gcloud functions deploy "$FUNCTION_NAME" \
                 --runtime python310 --trigger-http --entry-point "$ENTRY_POINT" \
-                --source "$fn_dir" --service-account training-project-419308@appspot.gserviceaccount.com \
-                --allow-unauthenticated --gen2 --region "$REGION" \
+                --source "$DEPLOY_SOURCE" --service-account training-project-419308@appspot.gserviceaccount.com \
+                --no-allow-unauthenticated --gen2 --region "$REGION" \
                 --memory 512Mi --timeout 540s \
                 --env-vars-file "$ENV_VARS_FILE" --quiet && {
-                set_iam_policy "$FUNCTION_NAME" || true
-                echo "✅ [$CURRENT_NUM/$TOTAL_FUNCTIONS] Deployed: $FUNCTION_NAME (HTTP trigger)"
+                set_frontend_invoker "$FUNCTION_NAME" || true
+                echo "✅ [$CURRENT_NUM/$TOTAL_FUNCTIONS] Deployed: $FUNCTION_NAME (HTTP trigger, private)"
                 ((DEPLOYED_COUNT++)) || true
               } || {
                 echo "❌ [$CURRENT_NUM/$TOTAL_FUNCTIONS] Failed: $FUNCTION_NAME"
@@ -793,8 +859,9 @@ jobs:
               }
             fi
             
+            rm -rf "$DEPLOY_SOURCE"
             rm -f "$ENV_VARS_FILE"
-          done < <(find backend -type f -name "main.py")
+          done
           
           echo ""
           echo "📊 Deployment Summary:"
