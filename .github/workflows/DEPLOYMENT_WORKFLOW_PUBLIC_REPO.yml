@@ -498,7 +498,7 @@ jobs:
               detected_vars=$(find "$fn_dir" -name "*.py" -type f -exec grep -oE "os\.getenv\(['\"]([A-Z_][A-Z0-9_]*)['\"]" {} \; 2>/dev/null | \
                 sed "s/os\.getenv(['\"]//" | sed "s/['\"]//" | sort -u | tr '\n' ',' | sed 's/,$//')
               
-              [[ -n "$detected_vars" ]] && echo "🔍 Auto-detected: $detected_vars"
+              [[ -n "$detected_vars" ]] && echo "🔍 Auto-detected: $detected_vars" >&2
               
               # Combine and deduplicate
               IFS=',' read -ra DETECTED <<< "$detected_vars"

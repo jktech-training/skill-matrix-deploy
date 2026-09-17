@@ -117,7 +117,7 @@ These are used when deploying Cloud Functions. **Each secret contains all databa
   ```
 DB_HOST=34.47.204.166
 DB_USER=postgres
-DB_PASS=Skillmatrix@123
+DB_PASS=your_password
 DB_NAME=Skill_Matrix
 DB_SCHEMA=skill_matrix_v2_dev
 DB_PORT=5432
@@ -125,9 +125,15 @@ BUCKET_NAME=skill-matrix-dev-v2
 GCP_PROJECT=training-project-419308
 
 BASE_URL=https://asia-south1-training-project-419308.cloudfunctions.net/
-SEND_EMAIL_URL=https://asia-south1-training-project-419308.cloudfunctions.net/send_mail
+SEND_EMAIL_URL=https://asia-south1-training-project-419308.cloudfunctions.net/dev_send_mail_v2
 APP_URL=https://skill-matrix-140475459295.asia-south1.run.app/
 EMAIL_TEMPLATE=<!doctypehtml><html lang=en><meta charset=UTF-8><meta content='width=device-width,initial-scale=1'name=viewport><style>body{font-family:Arial,sans-serif;background-color:#f6f8fa;margin:0;padding:0;color:#333}.container{max-width:600px;margin:40px auto;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1)}.header{background:linear-gradient(to right,#1e40af,#2563eb,#3b82f6);color:#fff;padding:16px 24px;font-size:20px;font-weight:700;text-align:center}.content{padding:24px;line-height:1.6;background-color:#fff;color:#333}.content ul{padding-left:20px;margin-top:8px}.content li{margin-bottom:6px}.button{display:inline-block;margin-top:16px;padding:8px 16px;font-size:14px;color:#fff;background-color:#2563eb;text-decoration:none;border-radius:6px;text-align:center}.footer{padding:16px 24px;background-color:#f1f3f4;font-size:14px;color:#555;text-align:center}.footer strong{color:#202124}@media (prefers-color-scheme:dark){body{background-color:#1a1a1a!important;color:#e0e0e0!important}.container{box-shadow:0 2px 8px rgba(255,255,255,.05)}.header{background:linear-gradient(to right,#4b5563,#1f2937,#111827);color:#e0e0e0!important}.content{background-color:#2a2a2a;color:#e0e0e0}.button{background-color:#4f46e5;color:#fff!important}.footer{background-color:#333!important;color:#aaa!important}.footer strong{color:#fff!important}}</style><div class=container><div class=header>Skill Review Request</div><div class=content><p>Dear Manager,<p>The following skill(s) have been requested for review by <strong>{{requestee_name}}</strong>:<ul>{{requested_skills}}</ul><p>Please review and take the necessary action.<p><a class=button href={{skill_matrix_url}}>Go to Skill Matrix</a><p>Regards,<br><strong>Skill Matrix Review System</strong></div><div class=footer>This is an automated email. Please do not reply.</div></div>
+
+
+SMTP_SERVER=smtp.outlook.com
+SMTP_PORT=587
+SMTP_EMAIL=gennotification@jktech.com
+SMTP_PASS=your_password
 
 OPENAI_API_KEY=sk-proj-your-openai-api-key-here
   ```
@@ -136,21 +142,28 @@ OPENAI_API_KEY=sk-proj-your-openai-api-key-here
 - **Format**: Key-value pairs, one per line
 - **Example content**:
   ```
-  DB_HOST=34.47.204.166
+  DB_HOST=35.224.205.186
   DB_USER=postgres
-  DB_PASS=Skillmatrix@123
-  DB_NAME=Skill_Matrix
+  DB_PASS=your_password
+  DB_NAME=SkillMatrix-PROD
   DB_SCHEMA=skill_matrix_v2_prod
   DB_PORT=5432
   BUCKET_NAME=skill-matrix-prod-v2
   GCP_PROJECT=training-project-419308
 
-  BASE_URL=https://asia-south1-training-project-419308.cloudfunctions.net/
-  SEND_EMAIL_URL=https://asia-south1-training-project-419308.cloudfunctions.net/send_mail
+  BASE_URL=https://us-central1-training-project-419308.cloudfunctions.net/
+  SEND_EMAIL_URL=https://us-central1-training-project-419308.cloudfunctions.net/send_mail_v2
   APP_URL=https://skillmatrix-140475459295.us-central1.run.app/
   EMAIL_TEMPLATE=<!doctypehtml><html lang=en><meta charset=UTF-8><meta content='width=device-width,initial-scale=1'name=viewport><style>body{font-family:Arial,sans-serif;background-color:#f6f8fa;margin:0;padding:0;color:#333}.container{max-width:600px;margin:40px auto;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1)}.header{background:linear-gradient(to right,#1e40af,#2563eb,#3b82f6);color:#fff;padding:16px 24px;font-size:20px;font-weight:700;text-align:center}.content{padding:24px;line-height:1.6;background-color:#fff;color:#333}.content ul{padding-left:20px;margin-top:8px}.content li{margin-bottom:6px}.button{display:inline-block;margin-top:16px;padding:8px 16px;font-size:14px;color:#fff;background-color:#2563eb;text-decoration:none;border-radius:6px;text-align:center}.footer{padding:16px 24px;background-color:#f1f3f4;font-size:14px;color:#555;text-align:center}.footer strong{color:#202124}@media (prefers-color-scheme:dark){body{background-color:#1a1a1a!important;color:#e0e0e0!important}.container{box-shadow:0 2px 8px rgba(255,255,255,.05)}.header{background:linear-gradient(to right,#4b5563,#1f2937,#111827);color:#e0e0e0!important}.content{background-color:#2a2a2a;color:#e0e0e0}.button{background-color:#4f46e5;color:#fff!important}.footer{background-color:#333!important;color:#aaa!important}.footer strong{color:#fff!important}}</style><div class=container><div class=header>Skill Review Request</div><div class=content><p>Dear Manager,<p>The following skill(s) have been requested for review by <strong>{{requestee_name}}</strong>:<ul>{{requested_skills}}</ul><p>Please review and take the necessary action.<p><a class=button href={{skill_matrix_url}}>Go to Skill Matrix</a><p>Regards,<br><strong>Skill Matrix Review System</strong></div><div class=footer>This is an automated email. Please do not reply.</div></div>
 
+
+  SMTP_SERVER=smtp.outlook.com
+  SMTP_PORT=587
+  SMTP_EMAIL=gennotification@jktech.com
+  SMTP_PASS=your_password
+
   OPENAI_API_KEY=sk-proj-your-openai-api-key-here
+  
   ```
 
 **How to add these secrets:**
