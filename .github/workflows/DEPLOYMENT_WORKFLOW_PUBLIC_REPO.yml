@@ -546,9 +546,7 @@ jobs:
                 [[ "$var" == "$base_var" ]] && skip=true && break
               done
               [[ "$skip" == "true" ]] && continue
-              
-              # Get from DB secret only
-              [[ "$var" == "BUCKET_NAME" ]] && continue
+
               var_line=$(grep "^${var}=" "$temp_file" | head -n1)
               [[ -n "$var_line" ]] && {
                 var_value=$(echo "$var_line" | cut -d'=' -f2- | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
@@ -803,9 +801,10 @@ jobs:
               exit 1
             }
             
-            # Add BUCKET_NAME if needed
-            [[ "$REQUIRED_ENV_VARS" == *"BUCKET_NAME"* ]] && \
+            # BUCKET_NAME: DB secret value (set above) wins; branch default is only a fallback.
+            if [[ "$REQUIRED_ENV_VARS" == *"BUCKET_NAME"* ]] && ! grep -q "^BUCKET_NAME:" "$ENV_VARS_FILE"; then
               echo "BUCKET_NAME: \"${{ needs.setup.outputs.bucket_name }}\"" >> "$ENV_VARS_FILE"
+            fi
 
             # SSO verify URL for functions that call require_sso_bearer / gateway
             SSO_VERIFY_URL="${{ secrets.VITE_SSO_URL }}"

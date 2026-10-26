@@ -124,6 +124,9 @@ DB_PORT=5432
 BUCKET_NAME=skill-matrix-dev-v2
 GCP_PROJECT=training-project-419308
 
+TRANSCODER_PUBSUB_TOPIC=projects/training-project-419308/topics/dev-transcoder-job-events
+TRANSCODER_LOCATION=asia-south1
+
 BASE_URL=https://asia-south1-training-project-419308.cloudfunctions.net/
 SEND_EMAIL_URL=https://asia-south1-training-project-419308.cloudfunctions.net/dev_send_mail_v2
 APP_URL=https://skill-matrix-140475459295.asia-south1.run.app/
@@ -150,6 +153,9 @@ OPENAI_API_KEY=sk-proj-your-openai-api-key-here
   DB_PORT=5432
   BUCKET_NAME=skill-matrix-prod-v2
   GCP_PROJECT=training-project-419308
+
+  TRANSCODER_PUBSUB_TOPIC=projects/training-project-419308/topics/transcoder-job-events
+  TRANSCODER_LOCATION=us-central1
 
   BASE_URL=https://us-central1-training-project-419308.cloudfunctions.net/
   SEND_EMAIL_URL=https://us-central1-training-project-419308.cloudfunctions.net/send_mail_v2
